@@ -15,6 +15,8 @@ final class TrafficModel: ObservableObject {
     @Published private(set) var errorKey: String?
     @Published private(set) var errorArgument = ""
     @Published private(set) var refreshing = false
+    @Published private(set) var lastFailed = false
+    @Published private(set) var statusStyle = StatusStyle.iconText
     @Published private(set) var hasCredentials = false
     @Published private(set) var savedLogin = ""
     @Published private(set) var lastRoute: Route?
@@ -47,6 +49,7 @@ final class TrafficModel: ObservableObject {
         accentHex = defaults.string(forKey:"accentHex").flatMap { AccentRGB(hex:$0)?.hex } ?? AccentPreset.choices[0].hex
         if let data = defaults.data(forKey:"lastStats") { stats = try? JSONDecoder().decode(TrafficStats.self,from:data) }
         lastRefresh = defaults.object(forKey:"lastRefresh") as? Date
+        statusStyle = StatusStyle(rawValue:defaults.string(forKey:"statusStyle") ?? "") ?? .iconText
         let creds = CredentialStore.credentials
         hasCredentials = creds != nil; savedLogin = creds?.0 ?? ""
         loginEnabled = SMAppService.mainApp.status == .enabled
@@ -97,11 +100,12 @@ final class TrafficModel: ObservableObject {
             switch result {
             case .success(let (s,route)):
                 self.lastRoute = route; self.defaults.set(route.rawValue,forKey:"lastRoute")
-                self.stats = s; self.lastRefresh = Date(); self.errorKey = nil
+                self.stats = s; self.lastRefresh = Date(); self.errorKey = nil; self.lastFailed = false
                 self.defaults.set(try? JSONEncoder().encode(s),forKey:"lastStats")
                 self.defaults.set(self.lastRefresh,forKey:"lastRefresh")
                 self.evaluateAlerts()
             case .failure(let e):
+                self.lastFailed = true
                 switch e {
                 case .unauthorized: self.errorKey = "账号或密码错误（401）"; self.errorArgument = ""
                 case .http(let code): self.errorKey = "服务器返回 HTTP %@"; self.errorArgument = String(code)
@@ -138,10 +142,10 @@ final class TrafficModel: ObservableObject {
         content.title = "ESAI Impulse"
         if level == .depleted {
             content.subtitle = translate("DataImpulse 流量已用尽")
-            content.body = translate("当前剩余 %@，已超额 %@。",arguments:["0 GB",formatGB(max(0,-left))])
+            content.body = translate("当前剩余 %@，已超额 %@。",arguments:[formatTraffic(gb:left),formatTraffic(gb:max(0,-left))])
         } else {
             content.subtitle = translate("DataImpulse 流量偏低")
-            content.body = translate("剩余 %@，低于 %@ GB 提醒阈值。",arguments:[formatGB(left),thresholdText])
+            content.body = translate("剩余 %@，低于 %@ GB 提醒阈值。",arguments:[formatTraffic(gb:left),thresholdText])
         }
         content.sound = .default
         UNUserNotificationCenter.current().add(UNNotificationRequest(identifier:"traffic-\(level.rawValue)-\(Date().timeIntervalSince1970)",content:content,trigger:nil))
@@ -169,6 +173,30 @@ final class TrafficModel: ObservableObject {
     var routeText: String? {
         guard let route = lastRoute else { return nil }
         return translate(route == .direct ? "直连" : "系统网络")
+    }
+    func setStatusStyle(_ style: StatusStyle) { statusStyle = style; defaults.set(style.rawValue,forKey:"statusStyle") }
+    var stale: Bool { isStale(lastSuccess:lastRefresh, lastFailed:lastFailed, intervalMinutes:intervalMinutes) }
+    func statusSnapshot(spinPhase: Double?) -> StatusSnapshot {
+        var s = StatusSnapshot()
+        s.leftLabel = translate("剩余 %@"); s.usedLabel = translate("已用 %@")
+        s.spinPhase = spinPhase
+        guard let stats = stats else { s.fraction = 0; s.text = hasCredentials ? nil : nil; return s }
+        s.text = formatTraffic(gb:stats.leftGB)
+        s.fraction = ringFraction(leftGB:stats.leftGB, thresholdGB:thresholdGB)
+        s.level = level
+        s.stale = stale && spinPhase == nil
+        s.usedPercent = stats.usedFraction*100
+        return s
+    }
+    var tooltip: String {
+        guard let s = stats else { return translate("ESAI Impulse · DataImpulse 剩余流量") }
+        var lines = ["ESAI Impulse",
+            translate("剩余 %@ / 总量 %@",arguments:[formatTraffic(gb:s.leftGB),formatTraffic(gb:TrafficStats.gb(s.total))]),
+            translate("已用 %@",arguments:[String(format:"%.1f%%",s.usedFraction*100)])]
+        if s.leftGB < 0 { lines.append(translate("已超额 %@",arguments:[formatTraffic(gb:-s.leftGB)])) }
+        if let last = lastRefresh { lines.append(translate("上次刷新 %@ · %@",arguments:[timeText(last),routeText ?? "—"])) }
+        if stale { lines.append(translate(lastFailed ? "上次刷新失败，数据可能已过期" : "数据可能已过期")) }
+        return lines.joined(separator:"\n")
     }
     func setInterval(_ minutes: Int) { intervalMinutes = minutes; defaults.set(minutes,forKey:"intervalMinutes"); scheduleTimer() }
     func setThreshold(_ gb: Double) {

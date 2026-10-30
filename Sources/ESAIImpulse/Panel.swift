@@ -105,11 +105,11 @@ struct TrafficPanel: View {
         return VStack(alignment:.leading,spacing:14) {
             VStack(alignment:.leading,spacing:6) {
                 Text(t("剩余流量")).font(.callout.weight(.medium)).foregroundStyle(.secondary)
-                Text(left <= 0 ? "0 GB" : formatGB(left,locale:model.resolvedLanguage.locale))
+                Text(formatTraffic(gb:left))
                     .font(.system(size:34,weight:.semibold,design:.rounded)).monospacedDigit()
                     .foregroundStyle(model.level == .normal ? Color.primary : levelColor)
                 if left < 0 {
-                    Text(t("已超额 %@",formatGB(-left,locale:model.resolvedLanguage.locale)))
+                    Text(t("已超额 %@",formatTraffic(gb:-left)))
                         .font(.caption.weight(.semibold)).foregroundStyle(.red)
                         .padding(.horizontal,7).padding(.vertical,3).background(Color.red.opacity(0.1),in:Capsule())
                 }
@@ -131,8 +131,8 @@ struct TrafficPanel: View {
                 }.frame(height:6)
             }
             HStack(spacing:8) {
-                statCard(t("总流量"),formatGB(TrafficStats.gb(s.total),locale:model.resolvedLanguage.locale))
-                statCard(t("已用"),formatGB(TrafficStats.gb(s.used),locale:model.resolvedLanguage.locale))
+                statCard(t("总流量"),formatTraffic(gb:TrafficStats.gb(s.total)))
+                statCard(t("已用"),formatTraffic(gb:TrafficStats.gb(s.used)))
             }
         }
     }
@@ -271,6 +271,15 @@ struct TrafficPanel: View {
 
     private var appearanceEditor: some View {
         VStack(alignment:.leading,spacing:16) {
+            VStack(alignment:.leading,spacing:8) {
+                Text(t("状态栏样式")).font(.headline)
+                EsaiGlassSegments(selection:Binding(get:{model.statusStyle.rawValue},set:{ if let v = StatusStyle(rawValue:$0) { model.setStatusStyle(v) } }),options:[
+                    .init(id:"iconText",title:t("图标+数字")), .init(id:"icon",title:t("仅图标")), .init(id:"compact",title:t("两行紧凑"))
+                ],accent:accent,label:t("状态栏样式"))
+                Text(t("环的长度 = 剩余 ÷ 提醒阈值；偏低变橙，用尽变红并带角标。"))
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+            }
+            EsaiHairline()
             VStack(alignment:.leading,spacing:8) {
                 Text(t("外观模式")).font(.headline)
                 EsaiGlassSegments(selection:Binding(get:{model.appearance},set:{model.setAppearance($0)}),options:[

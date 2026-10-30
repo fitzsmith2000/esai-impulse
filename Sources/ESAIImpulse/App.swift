@@ -36,7 +36,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNU
         model = TrafficModel()
         statusItem = NSStatusBar.system.statusItem(withLength:NSStatusItem.variableLength)
         statusItem.button?.imagePosition = .imageLeading
-        statusItem.button?.target = self; statusItem.button?.action = #selector(togglePanel)
+        statusItem.button?.target = self; statusItem.button?.action = #selector(statusClicked)
+        statusItem.button?.sendAction(on:[.leftMouseUp,.rightMouseUp])
         popover = NSPopover(); popover.behavior = .applicationDefined; popover.delegate = self; popover.animates = false
         popover.contentViewController = PanelHostController(model:model)
         model.objectWillChange.receive(on:RunLoop.main).sink { [weak self] _ in
@@ -55,24 +56,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNU
         completionHandler([.banner,.sound])
     }
 
+    private var spinTimer: Timer?
+    private var spinPhase: Double = 0
+    private lazy var contextMenu: NSMenu = NSMenu()
+
     private func updateStatusItem() {
         guard let button = statusItem.button else { return }
-        if button.image == nil {
-            let image = Bundle.main.url(forResource:"StatusTemplate",withExtension:"pdf").flatMap(NSImage.init(contentsOf:))
-                ?? NSImage(systemSymbolName:"antenna.radiowaves.left.and.right",accessibilityDescription:"ESAI Impulse")
-            image?.size = NSSize(width:18,height:18); image?.isTemplate = true
-            image?.accessibilityDescription = "ESAI Impulse"
-            button.image = image
-        }
-        let text: String; var color: NSColor? = nil
-        if let left = model.leftGB {
-            text = " " + statusText(leftGB:left)
-            switch model.level { case .depleted: color = .systemRed; case .low: color = .systemOrange; case .normal: color = nil }
-        } else { text = model.hasCredentials ? " — GB" : "" }
-        var attrs: [NSAttributedString.Key:Any] = [.font:NSFont.monospacedDigitSystemFont(ofSize:NSFont.systemFontSize,weight:.medium),.baselineOffset:0]
-        if let color = color { attrs[.foregroundColor] = color }
-        button.attributedTitle = NSAttributedString(string:text,attributes:attrs)
-        button.toolTip = model.translate("ESAI Impulse · DataImpulse 剩余流量")
+        if model.refreshing && spinTimer == nil {
+            spinPhase = 0
+            spinTimer = Timer(timeInterval:1.0/30, repeats:true) { [weak self] _ in
+                guard let self = self else { return }
+                self.spinPhase = (self.spinPhase + 12).truncatingRemainder(dividingBy:360); self.drawStatus()
+            }
+            RunLoop.main.add(spinTimer!, forMode:.common)
+        } else if !model.refreshing, let timer = spinTimer { timer.invalidate(); spinTimer = nil }
+        drawStatus()
+        button.toolTip = model.tooltip
+    }
+    private func drawStatus() {
+        guard let button = statusItem.button else { return }
+        let snapshot = model.statusSnapshot(spinPhase:spinTimer == nil ? nil : spinPhase)
+        let image = StatusRenderer.image(snapshot, style:model.statusStyle)
+        button.title = ""; button.imagePosition = .imageOnly
+        button.image = image
+        statusItem.length = image.size.width + 8
+    }
+
+    @objc private func statusClicked() {
+        if NSApp.currentEvent?.type == .rightMouseUp { showContextMenu() } else { togglePanel() }
+    }
+    private func showContextMenu() {
+        if popover.isShown { popover.performClose(nil) }
+        let menu = NSMenu()
+        let refresh = NSMenuItem(title:model.translate("立即刷新"), action:#selector(menuRefresh), keyEquivalent:"r"); refresh.target = self
+        let settings = NSMenuItem(title:model.translate("设置…"), action:#selector(menuSettings), keyEquivalent:","); settings.target = self
+        let quit = NSMenuItem(title:model.translate("退出 ESAI Impulse"), action:#selector(NSApplication.terminate(_:)), keyEquivalent:"q")
+        menu.items = [refresh, settings, .separator(), quit]
+        statusItem.menu = menu
+        statusItem.button?.performClick(nil)
+        statusItem.menu = nil
+    }
+    @objc private func menuRefresh() { model.refresh() }
+    @objc private func menuSettings() {
+        model.navigation.settingsTab = "account"; model.navigation.showingSettings = true
+        if !popover.isShown { togglePanel() }
     }
 
     private func applyAppearance(_ preference: String) {
@@ -141,6 +168,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNU
 @main struct ESAIImpulseApp {
     static func main() {
         if CommandLine.arguments.contains("--self-test") { SelfTest.run(); return }
+        if let i = CommandLine.arguments.firstIndex(of:"--render-statusbar") {
+            let folder = CommandLine.arguments.count > i+1 ? CommandLine.arguments[i+1] : "/tmp/esai-impulse-statusbar"
+            _ = NSApplication.shared
+            StatusRenderer.renderPreviews(to:folder); return
+        }
         if CommandLine.arguments.contains("--probe") { CLI.probe(); return }
         if CommandLine.arguments.contains("--refresh-once") { CLI.refreshOnce(); return }
         let app = NSApplication.shared
@@ -177,9 +209,20 @@ enum SelfTest {
         let json = #"{"total_traffic":4522600562688,"traffic_used":4522636562688,"traffic_left":-36000000,"used_threads":0,"status":"ok"}"#
         let s = try! JSONDecoder().decode(TrafficStats.self,from:Data(json.utf8))
         precondition(abs(s.leftGB - -0.036) < 1e-9)
-        precondition(statusText(leftGB:s.leftGB) == "0 GB")
         precondition(formatGB(TrafficStats.gb(s.total)) == "4,522.6 GB")
-        precondition(statusText(leftGB:128.44) == "128.4 GB")
+        let units: [(Double,String)] = [(4522.6,"4.5 TB"),(1234,"1.2 TB"),(1000,"1.0 TB"),(128.4,"128 GB"),(100,"100 GB"),(99.96,"100 GB"),
+            (86.24,"86.2 GB"),(1,"1.0 GB"),(0.85,"850 MB"),(0,"0 MB"),(-0.036,"-36 MB"),(-1.5,"-1.5 GB")]
+        for (v,e) in units { precondition(formatTraffic(gb:v) == e, "formatTraffic(\(v)) = \(formatTraffic(gb:v)), expected \(e)") }
+        precondition(formatTraffic(gb:s.leftGB) == "-36 MB")
+        precondition(ringFraction(leftGB:128, thresholdGB:200) == 0.64)
+        precondition(ringFraction(leftGB:250, thresholdGB:200) == 1)
+        precondition(ringFraction(leftGB:-0.036, thresholdGB:200) == 0)
+        let now = Date()
+        precondition(!isStale(lastSuccess:now.addingTimeInterval(-29*60), lastFailed:false, intervalMinutes:15, now:now))
+        precondition(isStale(lastSuccess:now.addingTimeInterval(-31*60), lastFailed:false, intervalMinutes:15, now:now))
+        precondition(isStale(lastSuccess:now, lastFailed:true, intervalMinutes:15, now:now))
+        precondition(!isStale(lastSuccess:nil, lastFailed:false, intervalMinutes:15, now:now))
+        precondition(StatusRenderer.size(for:StatusSnapshot(text:"-36 MB"), style:.iconText) == StatusRenderer.size(for:StatusSnapshot(text:"888.8 GB"), style:.iconText))
         precondition(AlertLevel.of(leftGB:s.leftGB,threshold:200) == .depleted)
         precondition(AlertLevel.of(leftGB:150,threshold:200) == .low)
         precondition(alertTransition(previous:.normal,current:.low) == .low)
@@ -232,7 +275,7 @@ enum CLI {
         wait { done in
             TrafficClient.fetch(login:login, password:password, mode:.auto) { result in
                 switch result {
-                case .success(let (s,route)): print("REFRESH http=200 route=\(route.rawValue) left_gb=\(String(format:"%.3f",s.leftGB)) total_gb=\(String(format:"%.1f",TrafficStats.gb(s.total)))")
+                case .success(let (s,route)): print("REFRESH http=200 route=\(route.rawValue) left=\(formatTraffic(gb:s.leftGB)) left_gb=\(String(format:"%.3f",s.leftGB))")
                 case .failure(.unauthorized): print("REFRESH http=401 (login/password rejected)")
                 case .failure(.http(let code)): print("REFRESH http=\(code)")
                 case .failure(.blocked(let sys, let dir)): print("REFRESH failed system=\"\(sys)\" direct=\"\(dir ?? "-")\"")
