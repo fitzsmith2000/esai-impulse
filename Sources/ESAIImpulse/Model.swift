@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import ServiceManagement
 import UserNotifications
+import Network
 
 final class PanelNavigation: ObservableObject {
     @Published var showingSettings = false
@@ -16,6 +17,10 @@ final class TrafficModel: ObservableObject {
     @Published private(set) var refreshing = false
     @Published private(set) var hasCredentials = false
     @Published private(set) var savedLogin = ""
+    @Published private(set) var lastRoute: Route?
+    @Published private(set) var connectionMode = ConnectionMode.auto
+    private var pathMonitor: NWPathMonitor?
+    private var lastPathKey = ""
     @Published var intervalMinutes = 15
     @Published var thresholdGB = 200.0
     @Published var appearance = "system"
@@ -53,6 +58,23 @@ final class TrafficModel: ObservableObject {
         observers.append(NSWorkspace.shared.notificationCenter.addObserver(forName:NSWorkspace.didWakeNotification,object:nil,queue:.main) { [weak self] _ in
             DispatchQueue.main.asyncAfter(deadline:.now()+5) { self?.refresh() }
         })
+        connectionMode = ConnectionMode(rawValue:defaults.string(forKey:"connectionMode") ?? "auto") ?? .auto
+        lastRoute = defaults.string(forKey:"lastRoute").flatMap(Route.init(rawValue:))
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] path in
+            let key = "\(path.status)|" + path.availableInterfaces.map(\.name).joined(separator:",")
+            DispatchQueue.main.async {
+                guard let self = self, key != self.lastPathKey else { return }
+                let first = self.lastPathKey.isEmpty
+                self.lastPathKey = key
+                guard !first else { return }
+                // Network changed (Wi-Fi switch, VPN/TUN on/off): forget the cached route and retry.
+                TrafficClient.resetCache()
+                if path.status == .satisfied { DispatchQueue.main.asyncAfter(deadline:.now()+3) { self.refresh() } }
+            }
+        }
+        monitor.start(queue:DispatchQueue(label:"esai-impulse.path"))
+        pathMonitor = monitor
         scheduleTimer()
         refresh()
     }
@@ -69,11 +91,12 @@ final class TrafficModel: ObservableObject {
         hasCredentials = true
         guard !refreshing else { return }
         refreshing = true
-        TrafficClient.fetch(login:login,password:password) { [weak self] result in
+        TrafficClient.fetch(login:login,password:password,mode:connectionMode) { [weak self] result in
             guard let self = self else { return }
             self.refreshing = false
             switch result {
-            case .success(let s):
+            case .success(let (s,route)):
+                self.lastRoute = route; self.defaults.set(route.rawValue,forKey:"lastRoute")
                 self.stats = s; self.lastRefresh = Date(); self.errorKey = nil
                 self.defaults.set(try? JSONEncoder().encode(s),forKey:"lastStats")
                 self.defaults.set(self.lastRefresh,forKey:"lastRefresh")
@@ -83,7 +106,11 @@ final class TrafficModel: ObservableObject {
                 case .unauthorized: self.errorKey = "账号或密码错误（401）"; self.errorArgument = ""
                 case .http(let code): self.errorKey = "服务器返回 HTTP %@"; self.errorArgument = String(code)
                 case .decoding: self.errorKey = "无法解析返回数据"; self.errorArgument = ""
-                case .network(let m): self.errorKey = "网络错误：%@"; self.errorArgument = m
+                case .network(let m):
+                    self.errorKey = self.connectionMode == .direct ? "直连失败：%@" : "网络错误：%@"; self.errorArgument = m
+                case .blocked(let sys, let dir):
+                    if let dir = dir { self.errorKey = "系统网络与直连均失败：%@"; self.errorArgument = "\(sys) / \(dir)" }
+                    else { self.errorKey = "连接可能被代理或 VPN 阻断（%@）。可在设置中将连接方式改为「直连」。"; self.errorArgument = sys }
                 case .missingCredentials: self.errorKey = nil
                 }
             }
@@ -134,6 +161,14 @@ final class TrafficModel: ObservableObject {
         CredentialStore.delete("login"); CredentialStore.delete("password")
         savedLogin = ""; hasCredentials = false; stats = nil; errorKey = nil
         defaults.removeObject(forKey:"lastStats"); defaults.removeObject(forKey:"lastRefresh"); lastRefresh = nil
+    }
+    func setConnectionMode(_ mode: ConnectionMode) {
+        connectionMode = mode; defaults.set(mode.rawValue,forKey:"connectionMode")
+        TrafficClient.resetCache(); refresh()
+    }
+    var routeText: String? {
+        guard let route = lastRoute else { return nil }
+        return translate(route == .direct ? "直连" : "系统网络")
     }
     func setInterval(_ minutes: Int) { intervalMinutes = minutes; defaults.set(minutes,forKey:"intervalMinutes"); scheduleTimer() }
     func setThreshold(_ gb: Double) {

@@ -26,27 +26,97 @@ struct TrafficStats: Codable, Equatable {
 
 enum TrafficError: Error {
     case missingCredentials, unauthorized, http(Int), decoding, network(String)
+    /// The system route failed at the network/TLS layer (typical of a proxy/VPN dropping it).
+    case blocked(system: String, direct: String?)
+    var fallbackEligible: Bool { if case .network = self { return true }; return false }
+    var message: String { if case .network(let m) = self { return m }; return "\(self)" }
 }
 
+/// Fetches stats over the normal system network, or directly over the physical interface.
 enum TrafficClient {
+    static let host = "gw.dataimpulse.com"
+    static let port: UInt16 = 777
     static let endpoint = URL(string:"https://gw.dataimpulse.com:777/api/stats")!
-    static func fetch(login: String, password: String, completion: @escaping (Result<TrafficStats,TrafficError>) -> Void) {
-        var request = URLRequest(url:endpoint, cachePolicy:.reloadIgnoringLocalCacheData, timeoutInterval:25)
-        let token = Data("\(login):\(password)".utf8).base64EncodedString()
-        request.setValue("Basic \(token)",forHTTPHeaderField:"Authorization")
-        request.setValue("application/json",forHTTPHeaderField:"Accept")
-        let config = URLSessionConfiguration.ephemeral
-        config.urlCache = nil
-        URLSession(configuration:config).dataTask(with:request) { data, response, error in
-            let result: Result<TrafficStats,TrafficError>
-            if let error = error { result = .failure(.network(error.localizedDescription)) }
-            else if let http = response as? HTTPURLResponse, http.statusCode != 200 {
-                result = .failure(http.statusCode == 401 ? .unauthorized : .http(http.statusCode))
-            } else if let data = data, let stats = try? JSONDecoder().decode(TrafficStats.self,from:data) {
-                result = .success(stats)
-            } else { result = .failure(.decoding) }
-            DispatchQueue.main.async { completion(result) }
-        }.resume()
+    /// Route that last worked; tried first in auto mode. Cleared on network changes.
+    static var preferredRoute: Route?
+    static var cachedIPs: [String] = []
+    static func resetCache() { preferredRoute = nil; cachedIPs = [] }
+
+    static func authorization(_ login: String?, _ password: String?) -> String? {
+        guard let l = login, let p = password else { return nil }
+        return "Basic " + Data("\(l):\(p)".utf8).base64EncodedString()
+    }
+
+    static func fetch(login: String, password: String, mode: ConnectionMode,
+                      completion: @escaping (Result<(TrafficStats,Route),TrafficError>) -> Void) {
+        let auth = authorization(login,password)
+        let order: [Route]
+        switch mode {
+        case .system: order = [.system]
+        case .direct: order = [.direct]
+        case .auto: order = preferredRoute == .direct ? [.direct,.system] : [.system,.direct]
+        }
+        var errors: [Route:TrafficError] = [:]
+        func attempt(_ index: Int) {
+            guard index < order.count else {
+                let sys = errors[.system]?.message, dir = errors[.direct]?.message
+                if let sys = sys { return completion(.failure(.blocked(system:sys, direct:dir))) }
+                return completion(.failure(.network(dir ?? "unknown")))
+            }
+            let route = order[index]
+            raw(route:route, authorization:auth) { result in
+                switch result {
+                case .success(let r):
+                    if r.status == 401 { return completion(.failure(.unauthorized)) }
+                    guard r.status == 200 else { return completion(.failure(.http(r.status))) }
+                    guard let stats = try? JSONDecoder().decode(TrafficStats.self, from:r.body) else { return completion(.failure(.decoding)) }
+                    preferredRoute = route
+                    completion(.success((stats,route)))
+                case .failure(let e):
+                    errors[route] = e
+                    if e.fallbackEligible { attempt(index+1) } else { completion(.failure(e)) }
+                }
+            }
+        }
+        attempt(0)
+    }
+
+    /// One request over one route; returns status + body without interpreting them.
+    static func raw(route: Route, authorization: String?, completion: @escaping (Result<DirectHTTP.Response,TrafficError>) -> Void) {
+        switch route {
+        case .system:
+            var request = URLRequest(url:endpoint, cachePolicy:.reloadIgnoringLocalCacheData, timeoutInterval:20)
+            if let auth = authorization { request.setValue(auth, forHTTPHeaderField:"Authorization") }
+            request.setValue("application/json", forHTTPHeaderField:"Accept")
+            let config = URLSessionConfiguration.ephemeral; config.urlCache = nil
+            URLSession(configuration:config).dataTask(with:request) { data, response, error in
+                let result: Result<DirectHTTP.Response,TrafficError>
+                if let error = error { result = .failure(.network(error.localizedDescription)) }
+                else if let http = response as? HTTPURLResponse { result = .success(.init(status:http.statusCode, body:data ?? Data())) }
+                else { result = .failure(.network("no response")) }
+                DispatchQueue.main.async { completion(result) }
+            }.resume()
+        case .direct:
+            DirectHTTP.physicalInterface { interface in
+                DispatchQueue.main.async {
+                    guard let interface = interface else { return completion(.failure(.network("no physical network interface"))) }
+                    let go: ([String]) -> Void = { ips in
+                        guard !ips.isEmpty else { return completion(.failure(.network("DNS-over-HTTPS lookup failed"))) }
+                        cachedIPs = ips
+                        var headers = ["Accept":"application/json"]
+                        if let auth = authorization { headers["Authorization"] = auth }
+                        func tryIP(_ i: Int, _ last: TrafficError?) {
+                            guard i < ips.count else { cachedIPs = []; return completion(.failure(last ?? .network("unreachable"))) }
+                            DirectHTTP.get(ip:ips[i], port:port, serverName:host, path:"/api/stats", headers:headers, interface:interface, timeout:15) { result in
+                                if case .failure(let e) = result { tryIP(i+1, e) } else { completion(result) }
+                            }
+                        }
+                        tryIP(0, nil)
+                    }
+                    if !cachedIPs.isEmpty { go(cachedIPs) } else { RealDNS.resolve(host, interface:interface, completion:go) }
+                }
+            }
+        }
     }
 }
 

@@ -50,8 +50,13 @@ enum L10n {
         "DataImpulse 流量偏低":"DataImpulse traffic is low", "DataImpulse 流量已用尽":"DataImpulse traffic is used up",
         "剩余 %@，低于 %@ GB 提醒阈值。":"%@ left, below your %@ GB threshold.",
         "当前剩余 %@，已超额 %@。":"%@ left, overdrawn by %@.",
-        "账号或密码错误（401）":"Wrong login or password (401)", "网络错误：%@":"Network error: %@",
+        "账号或密码错误（401）":"Wrong login or password (401)", "账号或密码错误":"Wrong login or password", "网络错误：%@":"Network error: %@",
         "服务器返回 HTTP %@":"Server returned HTTP %@", "无法解析返回数据":"Could not parse the response",
-        "仅显示信息，不会执行任何操作。":"Informational only.", "在 GitHub 上查看项目":"View project on GitHub"
+        "仅显示信息，不会执行任何操作。":"Informational only.", "在 GitHub 上查看项目":"View project on GitHub",
+        "连接方式":"Connection", "自动（推荐）":"Automatic (recommended)", "走系统网络":"System network", "直连（绕过代理 / VPN）":"Direct (bypass proxy / VPN)",
+        "自动：先走系统网络，失败时经物理网卡直连 DataImpulse，绕过代理 / VPN 的 TUN。":"Automatic tries the system network first, then connects directly over the physical interface, bypassing proxy/VPN TUN.",
+        "直连":"Direct", "系统网络":"System", "已绕过代理 / VPN，经物理网卡直连":"Bypassed proxy/VPN via the physical interface", "经系统网络连接":"Connected via the system network",
+        "直连失败：%@":"Direct connection failed: %@", "系统网络与直连均失败：%@":"Both system and direct connections failed: %@",
+        "连接可能被代理或 VPN 阻断（%@）。可在设置中将连接方式改为「直连」。":"The connection may be blocked by a proxy or VPN (%@). Try Connection → Direct in Settings."
     ]
 }

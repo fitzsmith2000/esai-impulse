@@ -141,6 +141,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNU
 @main struct ESAIImpulseApp {
     static func main() {
         if CommandLine.arguments.contains("--self-test") { SelfTest.run(); return }
+        if CommandLine.arguments.contains("--probe") { CLI.probe(); return }
+        if CommandLine.arguments.contains("--refresh-once") { CLI.refreshOnce(); return }
         let app = NSApplication.shared
         let delegate = AppDelegate()
         app.delegate = delegate
@@ -188,6 +190,56 @@ enum SelfTest {
         for (key,sel) in [("v","paste:"),("c","copy:"),("x","cut:"),("a","selectAll:"),("z","undo:")] {
             precondition(edit.items.contains { $0.keyEquivalent == key && $0.action == Selector((sel)) && $0.keyEquivalentModifierMask == .command })
         }
+        let chunked = Data("HTTP/1.1 401 Unauthorized\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nabcd\r\n2\r\nef\r\n0\r\n\r\n".utf8)
+        let c = DirectHTTP.parse(chunked)!
+        precondition(c.complete && c.response.status == 401 && String(data:c.response.body,encoding:.utf8) == "abcdef")
+        let fixed = DirectHTTP.parse(Data("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}".utf8))!
+        precondition(fixed.complete && fixed.response.status == 200 && fixed.response.body.count == 2)
+        precondition(DirectHTTP.parse(Data("HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\n{}".utf8))!.complete == false)
+        let dns = Data(#"{"Answer":[{"type":5,"data":"x."},{"type":1,"data":"198.18.0.71"},{"type":1,"data":"162.43.189.215"}]}"#.utf8)
+        precondition(RealDNS.addresses(from:dns) == ["162.43.189.215"])
         print("SELF_TEST_OK")
+    }
+}
+
+/// Diagnostics. Never prints credentials or response bodies.
+enum CLI {
+    static func wait(_ body: (@escaping () -> Void) -> Void) {
+        var done = false
+        body { done = true }
+        let limit = Date().addingTimeInterval(90)
+        while !done && Date() < limit { RunLoop.main.run(until:Date().addingTimeInterval(0.05)) }
+    }
+    static func probe() {
+        wait { done in DirectHTTP.physicalInterface { i in print("PROBE physical_interface=\(i.map { "\($0.name) (\($0.type))" } ?? "none")"); done() } }
+        for route in [Route.system, .direct] {
+            let start = Date()
+            wait { done in
+                TrafficClient.raw(route:route, authorization:nil) { result in
+                    let ms = Int(Date().timeIntervalSince(start)*1000)
+                    switch result {
+                    case .success(let r): print("PROBE route=\(route.rawValue) http=\(r.status) reachable=\(r.status == 401 || r.status == 200) ms=\(ms)")
+                    case .failure(let e): print("PROBE route=\(route.rawValue) error=\"\(e.message)\" ms=\(ms)")
+                    }
+                    done()
+                }
+            }
+        }
+        print("PROBE direct_ips=\(TrafficClient.cachedIPs.joined(separator:","))")
+    }
+    static func refreshOnce() {
+        guard let (login,password) = CredentialStore.credentials else { print("REFRESH no credentials in keychain"); return }
+        wait { done in
+            TrafficClient.fetch(login:login, password:password, mode:.auto) { result in
+                switch result {
+                case .success(let (s,route)): print("REFRESH http=200 route=\(route.rawValue) left_gb=\(String(format:"%.3f",s.leftGB)) total_gb=\(String(format:"%.1f",TrafficStats.gb(s.total)))")
+                case .failure(.unauthorized): print("REFRESH http=401 (login/password rejected)")
+                case .failure(.http(let code)): print("REFRESH http=\(code)")
+                case .failure(.blocked(let sys, let dir)): print("REFRESH failed system=\"\(sys)\" direct=\"\(dir ?? "-")\"")
+                case .failure(let e): print("REFRESH failed \(e.message)")
+                }
+                done()
+            }
+        }
     }
 }

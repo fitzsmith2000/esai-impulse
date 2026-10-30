@@ -148,6 +148,12 @@ struct TrafficPanel: View {
             HStack(spacing:5) {
                 Image(systemName:"clock").foregroundStyle(accent)
                 Text(model.lastRefresh.map { t("上次刷新：%@",model.timeText($0)) } ?? t("尚未刷新")).font(.caption.weight(.semibold))
+                if let route = model.routeText, model.lastRefresh != nil {
+                    Text(route).font(.system(size:10,weight:.semibold)).foregroundStyle(model.lastRoute == .direct ? accent : Color.secondary)
+                        .padding(.horizontal,6).padding(.vertical,2)
+                        .background(model.lastRoute == .direct ? accent.opacity(0.12) : EsaiSurface.sunken,in:Capsule())
+                        .help(t(model.lastRoute == .direct ? "已绕过代理 / VPN，经物理网卡直连" : "经系统网络连接"))
+                }
                 Spacer()
             }
             HStack {
@@ -206,6 +212,17 @@ struct TrafficPanel: View {
                 }
             }
             if let error = model.errorText { Text(error).font(.caption).foregroundStyle(.orange) }
+            EsaiHairline()
+            VStack(alignment:.leading,spacing:8) {
+                Text(t("连接方式")).font(.headline)
+                EsaiAlignedMenu(selection:model.connectionMode.rawValue,choices:[
+                    .init(id:"auto",title:t("自动（推荐）")), .init(id:"system",title:t("走系统网络")),
+                    .init(id:"direct",title:t("直连（绕过代理 / VPN）"))
+                ],label:t("连接方式"),accent:accent) { if let m = ConnectionMode(rawValue:$0) { model.setConnectionMode(m) } }
+                    .frame(height:34).esaiGlassControl()
+                Text(t("自动：先走系统网络，失败时经物理网卡直连 DataImpulse，绕过代理 / VPN 的 TUN。"))
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+            }
             Label(t("账号和密码仅保存在 macOS 钥匙串中，不会写入文件或日志。"),systemImage:"lock.shield")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
                 .padding(12).frame(maxWidth:.infinity,alignment:.leading).esaiCard(.sunken)
