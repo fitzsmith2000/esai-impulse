@@ -26,7 +26,7 @@ func isStale(lastSuccess: Date?, lastFailed: Bool, intervalMinutes: Int, now: Da
     return now.timeIntervalSince(last) > Double(intervalMinutes)*60*2
 }
 
-enum StatusStyle: String, CaseIterable { case iconText, icon, compact }
+enum StatusStyle: String, CaseIterable, Codable { case iconText, icon, compact }
 
 struct StatusSnapshot {
     var text: String?            // nil = no data yet
@@ -41,11 +41,11 @@ struct StatusSnapshot {
 
 // MARK: - Typography (user adjustable; v1.1.2 defaults chosen by Fitz)
 
-enum StatusWeight: String, CaseIterable { case regular, medium, semibold
+enum StatusWeight: String, CaseIterable, Codable { case regular, medium, semibold
     var nsWeight: NSFont.Weight { switch self { case .regular: return .regular; case .medium: return .medium; case .semibold: return .semibold } }
 }
 
-struct StatusTypography: Equatable {
+struct StatusTypography: Equatable, Codable {
     /// v1.1.2 defaults (chosen by Fitz): 10.5 pt regular text with tabular digits.
     var fontSize: Double = 10.5
     var weight: StatusWeight = .regular
@@ -54,9 +54,24 @@ struct StatusTypography: Equatable {
     var spacing: Double = 9
     /// Stacked rows 8.5 pt at row centres 6 and 16 of a 22 pt canvas.
     var compactFontSize: Double = 8.5
+    /// Manual vertical nudge of the text (pt, positive = up), relative to the computed optical centre.
+    var textOffset: Double = 0
 
     static let defaults = StatusTypography()
-    static let fontRange = 9.0...14.0, iconRange = 12.0...20.0, spacingRange = 0.0...10.0, compactRange = 7.0...11.0
+    init(fontSize: Double = 10.5, weight: StatusWeight = .regular, iconSize: Double = 19, spacing: Double = 9, compactFontSize: Double = 8.5, textOffset: Double = 0) {
+        self.fontSize = fontSize; self.weight = weight; self.iconSize = iconSize; self.spacing = spacing
+        self.compactFontSize = compactFontSize; self.textOffset = textOffset
+    }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy:CodingKeys.self), d = StatusTypography()
+        self.init(fontSize:try c.decodeIfPresent(Double.self, forKey:.fontSize) ?? d.fontSize,
+                  weight:try c.decodeIfPresent(StatusWeight.self, forKey:.weight) ?? d.weight,
+                  iconSize:try c.decodeIfPresent(Double.self, forKey:.iconSize) ?? d.iconSize,
+                  spacing:try c.decodeIfPresent(Double.self, forKey:.spacing) ?? d.spacing,
+                  compactFontSize:try c.decodeIfPresent(Double.self, forKey:.compactFontSize) ?? d.compactFontSize,
+                  textOffset:try c.decodeIfPresent(Double.self, forKey:.textOffset) ?? 0)
+    }
+    static let fontRange = 9.0...14.0, iconRange = 12.0...20.0, spacingRange = 0.0...10.0, compactRange = 7.0...11.0, offsetRange = -3.0...3.0
 
     static func clamp(_ v: Double, _ r: ClosedRange<Double>, step: Double) -> Double {
         let snapped = (v/step).rounded()*step
@@ -68,11 +83,13 @@ struct StatusTypography: Equatable {
         t.iconSize = Self.clamp(iconSize, Self.iconRange, step:0.5)
         t.spacing = Self.clamp(spacing, Self.spacingRange, step:0.5)
         t.compactFontSize = Self.clamp(compactFontSize, Self.compactRange, step:0.5)
+        t.textOffset = Self.clamp(textOffset, Self.offsetRange, step:0.25)
         return t
     }
     func save(_ d: UserDefaults) {
         d.set(fontSize, forKey:"sb.fontSize"); d.set(weight.rawValue, forKey:"sb.weight")
         d.set(iconSize, forKey:"sb.iconSize"); d.set(spacing, forKey:"sb.spacing"); d.set(compactFontSize, forKey:"sb.compactFontSize")
+        d.set(textOffset, forKey:"sb.textOffset")
     }
     static func load(_ d: UserDefaults) -> StatusTypography {
         var t = StatusTypography()
@@ -81,6 +98,7 @@ struct StatusTypography: Equatable {
         if let v = d.object(forKey:"sb.iconSize") as? Double { t.iconSize = v }
         if let v = d.object(forKey:"sb.spacing") as? Double { t.spacing = v }
         if let v = d.object(forKey:"sb.compactFontSize") as? Double { t.compactFontSize = v }
+        if let v = d.object(forKey:"sb.textOffset") as? Double { t.textOffset = v }
         return t.clamped()
     }
     var font: NSFont { NSFont.monospacedDigitSystemFont(ofSize:fontSize, weight:weight.nsWeight) }
@@ -176,20 +194,20 @@ enum StatusRenderer {
     /// Baseline that puts the optical centre of digits / capitals ("-36 MB", "128 GB") on `cy`.
     /// Uses the font's cap height (SF digits are cap-height tall) instead of the
     /// ascender+descender line box, whose centre sits above the glyphs the eye reads.
-    static func baseline(centeredOn cy: CGFloat, font: NSFont) -> CGFloat {
-        ((cy - font.capHeight/2)*2).rounded(.down)/2
+    static func baseline(centeredOn cy: CGFloat, font: NSFont, offset: CGFloat = 0) -> CGFloat {
+        ((cy - font.capHeight/2)*2).rounded(.down)/2 + offset
     }
 
     /// Draws `text` with its cap-height band centred on `cy` (bottom-up), baseline pixel-aligned.
     @discardableResult
-    static func drawText(_ text: String, x: CGFloat, cy: CGFloat, font: NSFont, color: NSColor) -> CGFloat {
+    static func drawText(_ text: String, x: CGFloat, cy: CGFloat, font: NSFont, color: NSColor, offset: CGFloat = 0) -> CGFloat {
         let attrs: [NSAttributedString.Key:Any] = [.font:font, .foregroundColor:color]
         let str = NSAttributedString(string:text, attributes:attrs)
         let line = CTLineCreateWithAttributedString(str)
         if let ctx = NSGraphicsContext.current?.cgContext {
             ctx.saveGState()
             ctx.textMatrix = .identity
-            ctx.textPosition = CGPoint(x:snap(x), y:baseline(centeredOn:cy, font:font))
+            ctx.textPosition = CGPoint(x:snap(x), y:baseline(centeredOn:cy, font:font, offset:offset))
             CTLineDraw(line, ctx)
             ctx.restoreGState()
         }
@@ -234,24 +252,25 @@ enum StatusRenderer {
         drawIcon(s, at:NSPoint(x:rect.minX, y:rect.minY+snap((height-icon)/2)), size:icon, fg:fg)
         let ink = s.stale ? fg.withAlphaComponent(0.5) : fg
         let x = snap(rect.minX + icon + gap)
+        let dy = CGFloat(t.textOffset)
         switch style {
         case .icon: break
         case .iconText:
             // Left-aligned next to the icon; the slot keeps a fixed trailing width.
-            drawText(s.text ?? "—", x:x, cy:rect.minY+11, font:t.font, color:ink)
+            drawText(s.text ?? "—", x:x, cy:rect.minY+11, font:t.font, color:ink, offset:dy)
         case .compact:
             let l = [NSAttributedString.Key.font:t.compactLabelFont]
             let labelW = ceil(max(labelWidth(s.leftLabel, l), labelWidth(s.usedLabel, l)))
             let top = rect.minY+16, bottom = rect.minY+6   // Quosparr row centres 6 / 16 from the top
-            drawText(label(s.leftLabel), x:x, cy:top, font:t.compactLabelFont, color:ink.withAlphaComponent(0.62*ink.alphaComponent))
-            drawText(label(s.usedLabel), x:x, cy:bottom, font:t.compactLabelFont, color:ink.withAlphaComponent(0.62*ink.alphaComponent))
+            drawText(label(s.leftLabel), x:x, cy:top, font:t.compactLabelFont, color:ink.withAlphaComponent(0.62*ink.alphaComponent), offset:dy)
+            drawText(label(s.usedLabel), x:x, cy:bottom, font:t.compactLabelFont, color:ink.withAlphaComponent(0.62*ink.alphaComponent), offset:dy)
             let vx = x + labelW + 3
-            drawText(s.text ?? "—", x:vx, cy:top, font:t.compactValueFont, color:ink)
-            let bar = NSRect(x:vx, y:bottom-compactBar.height/2, width:compactBar.width, height:compactBar.height)
+            drawText(s.text ?? "—", x:vx, cy:top, font:t.compactValueFont, color:ink, offset:dy)
+            let bar = NSRect(x:vx, y:bottom+dy-compactBar.height/2, width:compactBar.width, height:compactBar.height)
             ink.withAlphaComponent(0.22*ink.alphaComponent).setFill(); NSBezierPath(roundedRect:bar, xRadius:2, yRadius:2).fill()
             var fill = bar; fill.size.width = max(4, bar.width*min(1, s.usedPercent/100))
             (ringColor(s.level) ?? ink).setFill(); NSBezierPath(roundedRect:fill, xRadius:2, yRadius:2).fill()
-            drawText(String(format:"%.0f%%", s.usedPercent), x:bar.maxX+3, cy:bottom, font:t.compactValueFont, color:ink)
+            drawText(String(format:"%.0f%%", s.usedPercent), x:bar.maxX+3, cy:bottom, font:t.compactValueFont, color:ink, offset:dy)
         }
     }
 

@@ -18,6 +18,8 @@ final class TrafficModel: ObservableObject {
     @Published private(set) var lastFailed = false
     @Published private(set) var statusStyle = StatusStyle.iconText
     @Published private(set) var typography = StatusTypography.defaults
+    @Published private(set) var statusConfigs = [StatusConfig.builtIn]
+    @Published private(set) var activeConfigID: String?
     @Published private(set) var hasCredentials = false
     @Published private(set) var savedLogin = ""
     @Published private(set) var lastRoute: Route?
@@ -36,11 +38,13 @@ final class TrafficModel: ObservableObject {
     @Published private var loginError: String?
     @Published private var loginNeedsApproval = false
     let navigation = PanelNavigation()
-    private let defaults = UserDefaults.standard
+    private let defaults: UserDefaults
     private var timer: Timer?
     private var observers: [NSObjectProtocol] = []
 
-    init() {
+    /// `preview` builds a model for offscreen rendering only: no Keychain, network or notifications.
+    init(defaults: UserDefaults = .standard, preview: Bool = false) {
+        self.defaults = defaults
         intervalMinutes = defaults.object(forKey:"intervalMinutes") as? Int ?? 15
         thresholdGB = defaults.object(forKey:"thresholdGB") as? Double ?? 200
         appearance = defaults.string(forKey:"appearance") ?? "system"
@@ -52,6 +56,10 @@ final class TrafficModel: ObservableObject {
         lastRefresh = defaults.object(forKey:"lastRefresh") as? Date
         statusStyle = StatusStyle(rawValue:defaults.string(forKey:"statusStyle") ?? "") ?? .iconText
         typography = StatusTypography.load(defaults)
+        statusConfigs = StatusConfigStore.load(defaults)
+        activeConfigID = defaults.string(forKey:StatusConfigStore.activeKey).flatMap { id in statusConfigs.contains { $0.id == id } ? id : nil }
+        if activeConfigID == nil { activeConfigID = statusConfigs.first { $0.matches(style:statusStyle, typography:typography) }?.id }
+        if preview { return }
         let creds = CredentialStore.credentials
         hasCredentials = creds != nil; savedLogin = creds?.0 ?? ""
         loginEnabled = SMAppService.mainApp.status == .enabled
@@ -178,6 +186,46 @@ final class TrafficModel: ObservableObject {
     }
     func setTypography(_ t: StatusTypography) { typography = t.clamped(); typography.save(defaults) }
     func resetTypography() { setTypography(.defaults) }
+
+    // MARK: Saved status bar configurations
+    var activeConfig: StatusConfig? { statusConfigs.first { $0.id == activeConfigID } }
+    /// The active configuration differs from the current live values.
+    var activeConfigModified: Bool { activeConfig.map { !$0.matches(style:statusStyle, typography:typography) } ?? false }
+    private func persistConfigs() {
+        StatusConfigStore.save(statusConfigs, defaults)
+        if let id = activeConfigID { defaults.set(id, forKey:StatusConfigStore.activeKey) } else { defaults.removeObject(forKey:StatusConfigStore.activeKey) }
+    }
+    func applyConfig(_ id: String) {
+        guard let c = statusConfigs.first(where:{ $0.id == id }) else { return }
+        setStatusStyle(c.style); setTypography(c.typography); activeConfigID = id; persistConfigs()
+    }
+    @discardableResult func saveConfig(named name: String) -> StatusConfig {
+        let trimmed = name.trimmingCharacters(in:.whitespacesAndNewlines)
+        let c = StatusConfig(id:UUID().uuidString, name:trimmed.isEmpty ? suggestedConfigName : trimmed, style:statusStyle, typography:typography)
+        statusConfigs.append(c); activeConfigID = c.id; persistConfigs(); return c
+    }
+    func overwriteActiveConfig() {
+        guard let id = activeConfigID, let i = statusConfigs.firstIndex(where:{ $0.id == id }), !statusConfigs[i].isBuiltIn else { return }
+        statusConfigs[i].style = statusStyle; statusConfigs[i].typography = typography; persistConfigs()
+    }
+    func renameConfig(_ id: String, to name: String) {
+        let trimmed = name.trimmingCharacters(in:.whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let i = statusConfigs.firstIndex(where:{ $0.id == id }), !statusConfigs[i].isBuiltIn else { return }
+        statusConfigs[i].name = trimmed; persistConfigs()
+    }
+    func deleteConfig(_ id: String) {
+        guard let i = statusConfigs.firstIndex(where:{ $0.id == id }), !statusConfigs[i].isBuiltIn else { return }
+        statusConfigs.remove(at:i)
+        if activeConfigID == id { activeConfigID = nil }
+        persistConfigs()
+    }
+    var suggestedConfigName: String { StatusConfigStore.nextName(statusConfigs, prefix:translate("配置")) }
+    func exportConfigs() -> Data { StatusConfigStore.exportJSON(statusConfigs) }
+    @discardableResult func importConfigs(_ data: Data) -> Bool {
+        guard let merged = StatusConfigStore.importJSON(data, into:statusConfigs) else { return false }
+        statusConfigs = merged; persistConfigs(); return true
+    }
+    func configDisplayName(_ c: StatusConfig) -> String { c.isBuiltIn ? translate("默认") : c.name }
     var previewSnapshot: StatusSnapshot {
         if stats != nil { return statusSnapshot(spinPhase:nil) }
         var s = StatusRenderer.sampleStates()[1].1

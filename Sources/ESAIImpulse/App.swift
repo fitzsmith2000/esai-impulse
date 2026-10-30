@@ -178,8 +178,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNU
             if let v = num("--icon") { t.iconSize = v }
             if let v = num("--spacing") { t.spacing = v }
             if let v = num("--compact") { t.compactFontSize = v }
+            if let v = num("--offset") { t.textOffset = v }
             if let w = a.firstIndex(of:"--weight").flatMap({ a.count > $0+1 ? StatusWeight(rawValue:a[$0+1]) : nil }) { t.weight = w }
             StatusRenderer.renderPreviews(to:folder, typography:t.clamped()); return
+        }
+        if let i = CommandLine.arguments.firstIndex(of:"--render-settings") {
+            let file = CommandLine.arguments.count > i+1 ? CommandLine.arguments[i+1] : "/tmp/esai-impulse-settings.png"
+            MainActor.assumeIsolated { SettingsRender.run(to:file, dark:CommandLine.arguments.contains("--dark")) }; return
         }
         if CommandLine.arguments.contains("--probe") { CLI.probe(); return }
         if CommandLine.arguments.contains("--refresh-once") { CLI.refreshOnce(); return }
@@ -209,6 +214,46 @@ enum EditMenu {
         edit.addItem(withTitle:"Select All",action:#selector(NSText.selectAll(_:)),keyEquivalent:"a")
         editItem.submenu = edit
         return main
+    }
+}
+
+/// Offscreen render of Settings → 外观 using the real TrafficPanel in a preview model
+/// (separate UserDefaults suite seeded from the user's status bar values; no Keychain or network).
+@MainActor enum SettingsRender {
+    static func run(to file: String, dark: Bool) {
+        let app = NSApplication.shared; app.setActivationPolicy(.prohibited)
+        let suiteName = "com.fitzsmith2000.esai-impulse.settings-render"
+        let d = UserDefaults(suiteName:suiteName)!
+        d.removePersistentDomain(forName:suiteName)
+        let real = UserDefaults.standard
+        for k in ["statusStyle","language","accentHex","appearance","sb.fontSize","sb.weight","sb.iconSize","sb.spacing","sb.compactFontSize","sb.textOffset","sb.configs","sb.activeConfig","lastStats","thresholdGB"] {
+            if let v = real.object(forKey:k) { d.set(v, forKey:k) }
+        }
+        if d.data(forKey:"sb.configs") == nil {
+            var t = StatusTypography.load(d); t.textOffset = 0.5
+            let demo = [StatusConfig(id:"demo-1", name:"配置 1", style:.iconText, typography:t)]
+            d.set(try! JSONEncoder().encode(demo), forKey:"sb.configs"); d.set("demo-1", forKey:"sb.activeConfig")
+            t.textOffset = 0.5; t.save(d)
+        }
+        let model = TrafficModel(defaults:d, preview:true)
+        model.navigation.showingSettings = true; model.navigation.settingsTab = "appearance"
+        model.panelSize = NSSize(width:PopoverLayout.preferredSize.width, height:1500)
+        let host = NSHostingView(rootView:TrafficPanel(model:model).appearanceForRender)
+        host.setFrameSize(host.fittingSize); model.panelSize = host.fittingSize
+        host.appearance = NSAppearance(named:dark ? .darkAqua : .aqua)
+        let window = NSWindow(contentRect:NSRect(origin:.zero, size:model.panelSize), styleMask:[.borderless], backing:.buffered, defer:false)
+        window.appearance = host.appearance; window.backgroundColor = dark ? NSColor(white:0.16, alpha:1) : NSColor(white:0.96, alpha:1)
+        window.contentView = host; window.setFrameOrigin(NSPoint(x:-10000, y:-10000)); window.orderFrontRegardless()
+        for _ in 0..<40 { RunLoop.main.run(until:Date().addingTimeInterval(0.05)); host.layoutSubtreeIfNeeded(); host.displayIfNeeded() }
+        EsaiRenderMode.offscreen = true
+        let r = ImageRenderer(content:TrafficPanel(model:model).appearanceForRender
+            .background(dark ? Color(white:0.13) : Color(white:0.97)).environment(\.colorScheme, dark ? .dark : .light))
+        r.scale = 2
+        guard let img = r.nsImage, let tiff = img.tiffRepresentation, let png = NSBitmapImageRep(data:tiff)?.representation(using:.png, properties:[:]) else { fatalError("render failed") }
+        try! png.write(to:URL(fileURLWithPath:file))
+        window.orderOut(nil)
+        d.removePersistentDomain(forName:suiteName)
+        print("RENDERED settings to \(file)")
     }
 }
 
@@ -249,6 +294,41 @@ enum SelfTest {
         precondition(alertTransition(previous:.low,current:.low) == nil)
         precondition(alertTransition(previous:.low,current:.depleted) == .depleted)
         precondition(alertTransition(previous:.depleted,current:.depleted) == nil)
+        // Text offset: default 0, clamps to ±3 and snaps to 0.25.
+        precondition(d.textOffset == 0)
+        precondition(StatusTypography(textOffset:9).clamped().textOffset == 3 && StatusTypography(textOffset:-7).clamped().textOffset == -3)
+        precondition(StatusTypography(textOffset:0.6).clamped().textOffset == 0.5 && StatusTypography(textOffset:-1.13).clamped().textOffset == -1.25)
+        let f = NSFont.systemFont(ofSize:11)
+        precondition(StatusRenderer.baseline(centeredOn:11, font:f, offset:1.25) - StatusRenderer.baseline(centeredOn:11, font:f) == 1.25)
+        // Old JSON without textOffset still decodes.
+        let legacy = try! JSONDecoder().decode(StatusTypography.self, from:Data(#"{"fontSize":12,"weight":"medium","iconSize":14,"spacing":3,"compactFontSize":9}"#.utf8))
+        precondition(legacy.fontSize == 12 && legacy.weight == .medium && legacy.textOffset == 0)
+        // Configurations: save / load / rename / overwrite / delete, built-in protected, export/import.
+        let suite = "com.fitzsmith2000.esai-impulse.selftest"
+        let ud = UserDefaults(suiteName:suite)!; ud.removePersistentDomain(forName:suite)
+        var t1 = StatusTypography.defaults; t1.textOffset = -1.5; t1.fontSize = 12; t1.save(ud); ud.set("compact", forKey:"statusStyle")
+        let m = TrafficModel(defaults:ud, preview:true)
+        precondition(m.statusConfigs.count == 1 && m.statusConfigs[0].isBuiltIn && m.activeConfigID == nil)
+        precondition(m.typography.textOffset == -1.5 && m.statusStyle == .compact)   // existing values preserved
+        precondition(m.suggestedConfigName.hasSuffix(" 1"))
+        let c1 = m.saveConfig(named:"  测试  ")
+        precondition(c1.name == "测试" && m.activeConfigID == c1.id && !m.activeConfigModified)
+        m.applyConfig(StatusConfig.builtInID)
+        precondition(m.typography == .defaults && m.statusStyle == .iconText && m.activeConfigID == StatusConfig.builtInID)
+        m.deleteConfig(StatusConfig.builtInID); precondition(m.statusConfigs.count == 2)
+        m.overwriteActiveConfig(); precondition(StatusConfigStore.load(ud)[0] == .builtIn)
+        m.applyConfig(c1.id); precondition(m.typography.textOffset == -1.5 && m.statusStyle == .compact)
+        var t2 = m.typography; t2.textOffset = 2; m.setTypography(t2); precondition(m.activeConfigModified)
+        m.overwriteActiveConfig(); precondition(!m.activeConfigModified)
+        m.renameConfig(c1.id, to:"新名字")
+        let m2 = TrafficModel(defaults:ud, preview:true)   // survives "restart"
+        precondition(m2.statusConfigs.count == 2 && m2.statusConfigs[1].name == "新名字" && m2.statusConfigs[1].typography.textOffset == 2 && m2.activeConfigID == c1.id)
+        let exported = m2.exportConfigs()
+        precondition(m2.importConfigs(exported) && m2.statusConfigs.count == 3 && m2.statusConfigs[2].id != c1.id)
+        precondition(!m2.importConfigs(Data("nope".utf8)))
+        m2.deleteConfig(c1.id); precondition(m2.activeConfigID == nil && m2.statusConfigs.count == 2)
+        precondition(TrafficModel(defaults:ud, preview:true).statusConfigs.count == 2)
+        ud.removePersistentDomain(forName:suite)
         let edit = EditMenu.make().items[1].submenu!
         for (key,sel) in [("v","paste:"),("c","copy:"),("x","cut:"),("a","selectAll:"),("z","undo:")] {
             precondition(edit.items.contains { $0.keyEquivalent == key && $0.action == Selector((sel)) && $0.keyEquivalentModifierMask == .command })

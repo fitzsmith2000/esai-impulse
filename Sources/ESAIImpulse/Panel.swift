@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct TrafficPanel: View {
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
@@ -269,6 +270,11 @@ struct TrafficPanel: View {
         thresholdDraft = model.thresholdText
     }
 
+    /// Settings → 外观 without the scroll host, for `--render-settings`.
+    var appearanceForRender: some View {
+        appearanceEditor.padding(16).frame(width:model.panelSize.width,alignment:.topLeading)
+            .tint(accent).preferredColorScheme(model.colorScheme).environment(\.locale,model.resolvedLanguage.locale)
+    }
     private var appearanceEditor: some View {
         VStack(alignment:.leading,spacing:16) {
             VStack(alignment:.leading,spacing:8) {
@@ -303,9 +309,11 @@ struct TrafficPanel: View {
                 typoSlider("图标大小",\.iconSize,StatusTypography.iconRange)
                 typoSlider("图标与文字间距",\.spacing,StatusTypography.spacingRange)
                 typoSlider("两行字号",\.compactFontSize,StatusTypography.compactRange)
-                Text(t("默认值：文字 10.5 pt 常规、图标 19 pt、间距 9 pt、两行 8.5 pt。修改即时生效。"))
+                offsetSlider
+                Text(t("默认值：文字 10.5 pt 常规、图标 19 pt、间距 9 pt、两行 8.5 pt、偏移 0。修改即时生效。"))
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
             }.padding(12).esaiCard(.sunken)
+            configsSection.padding(12).esaiCard(.sunken)
             EsaiHairline()
             VStack(alignment:.leading,spacing:8) {
                 Text(t("外观模式")).font(.headline)
@@ -384,6 +392,131 @@ struct TrafficPanel: View {
                 .controlSize(.small).accessibilityLabel(t(title))
             Text(String(format:"%.1f pt",model.typography[keyPath:key])).font(.caption).monospacedDigit()
                 .foregroundStyle(.secondary).frame(width:48,alignment:.trailing)
+        }
+    }
+
+    /// 「文字上下偏移」: -3…+3 pt in 0.25 pt steps, positive = up; zero tick in the middle, double-click or ↺ resets.
+    private var offsetSlider: some View {
+        let range = StatusTypography.offsetRange
+        let value = model.typography.textOffset
+        func set(_ v: Double) { var t = model.typography; t.textOffset = v; model.setTypography(t) }
+        return HStack(spacing:10) {
+            Text(t("文字上下偏移")).font(.callout.weight(.medium)).frame(width:96,alignment:.leading).lineLimit(1).minimumScaleFactor(0.8)
+            Slider(value:Binding(get:{ value },set:{ set($0) }),in:range,step:0.25)
+                .controlSize(.small).accessibilityLabel(t("文字上下偏移"))
+                .overlay(alignment:.center) {
+                    // Zero point marker (slider is symmetric, so 0 is the horizontal centre).
+                    Capsule().fill(Color.secondary.opacity(0.55)).frame(width:1.5,height:12).offset(y:-9).allowsHitTesting(false)
+                }
+                .onTapGesture(count:2) { set(0) }
+                .help(t("双击滑块归零；正值上移，负值下移"))
+            Button { set(0) } label: { Image(systemName:"arrow.counterclockwise").font(.caption2) }
+                .buttonStyle(.plain).foregroundStyle(value == 0 ? Color.secondary.opacity(0.35) : accent)
+                .disabled(value == 0).help(t("归零")).accessibilityLabel(t("归零"))
+            Text(value == 0 ? "0 pt" : String(format:"%+.2f pt",value)).font(.caption).monospacedDigit()
+                .foregroundStyle(.secondary).frame(width:48,alignment:.trailing)
+        }
+    }
+
+    // MARK: Saved status bar configurations
+    private var configsSection: some View {
+        VStack(alignment:.leading,spacing:10) {
+            HStack {
+                Text(t("已保存的配置")).font(.headline)
+                Spacer()
+                if EsaiRenderMode.offscreen { Image(systemName:"square.and.arrow.up.on.square").foregroundStyle(accent) } else { Menu {
+                    Button(t("导出配置…")) { exportConfigs() }.disabled(model.statusConfigs.count < 2)
+                    Button(t("导入配置…")) { importConfigs() }
+                } label: { Image(systemName:"square.and.arrow.up.on.square") }
+                    .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().help(t("导入 / 导出 JSON")) }
+            }
+            VStack(spacing:4) {
+                ForEach(model.statusConfigs) { c in configRow(c) }
+            }
+            HStack(spacing:8) {
+                Button(t("保存为配置…")) { saveAsConfig() }.font(.caption).esaiGlassButton(prominent:true)
+                Button(t("覆盖保存")) { model.overwriteActiveConfig() }.font(.caption).esaiGlassButton()
+                    .disabled(!(model.activeConfigModified && model.activeConfig?.isBuiltIn == false))
+                Spacer(minLength:0)
+            }
+            Text(t("配置包含样式、字号、字重、图标大小、间距、两行字号和文字偏移。点击即可切换；「默认」为内置配置，不可删除。"))
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+        }
+    }
+    private func configSummary(_ c: StatusConfig) -> String {
+        let style = c.style == .iconText ? t("图标+数字") : c.style == .icon ? t("仅图标") : t("两行紧凑")
+        let w = c.typography.weight == .regular ? t("常规") : c.typography.weight == .medium ? t("中等") : t("半粗")
+        let ty = c.typography
+        var parts = [style, String(format:"%g pt",ty.fontSize)+" "+w, t("图标 %@",String(format:"%g",ty.iconSize)), t("间距 %@",String(format:"%g",ty.spacing))]
+        if ty.textOffset != 0 { parts.append(t("偏移 %@",String(format:"%+g",ty.textOffset))) }
+        return parts.joined(separator:" · ")
+    }
+    private func configRow(_ c: StatusConfig) -> some View {
+        let active = model.activeConfigID == c.id
+        return HStack(spacing:8) {
+            Button { model.applyConfig(c.id) } label: {
+                HStack(spacing:8) {
+                    Image(systemName:active ? "checkmark.circle.fill" : "circle").foregroundStyle(active ? accent : Color.secondary.opacity(0.5))
+                    VStack(alignment:.leading,spacing:1) {
+                        HStack(spacing:4) {
+                            Text(model.configDisplayName(c)).font(.callout.weight(active ? .semibold : .regular)).lineLimit(1)
+                            if c.isBuiltIn { Image(systemName:"lock.fill").font(.system(size:8)).foregroundStyle(.secondary) }
+                            if active && model.activeConfigModified { Text(t("已修改")).font(.caption2).foregroundStyle(.orange) }
+                        }
+                        Text(configSummary(c)).font(.caption2).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
+                    }
+                    Spacer(minLength:0)
+                }.contentShape(Rectangle())
+            }.buttonStyle(.plain).accessibilityLabel(model.configDisplayName(c)).accessibilityAddTraits(active ? .isSelected : [])
+            if !c.isBuiltIn && EsaiRenderMode.offscreen { Image(systemName:"ellipsis.circle").foregroundStyle(.secondary) }
+            else if !c.isBuiltIn {
+                Menu {
+                    Button(t("重命名…")) { renameConfig(c) }
+                    Divider()
+                    Button(t("删除…"),role:.destructive) { deleteConfig(c) }
+                } label: { Image(systemName:"ellipsis.circle").foregroundStyle(.secondary) }
+                    .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+            }
+        }
+        .padding(.horizontal,8).padding(.vertical,6)
+        .background(RoundedRectangle(cornerRadius:8,style:.continuous).fill(active ? accent.opacity(0.12) : Color.clear))
+    }
+    private func promptName(title: String, initial: String, confirm: String) -> String? {
+        let alert = NSAlert(); alert.messageText = title
+        let field = NSTextField(frame:NSRect(x:0,y:0,width:240,height:24)); field.stringValue = initial
+        alert.accessoryView = field
+        alert.addButton(withTitle:confirm); alert.addButton(withTitle:t("取消"))
+        alert.window.initialFirstResponder = field
+        NSApp.activate(ignoringOtherApps:true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        let v = field.stringValue.trimmingCharacters(in:.whitespacesAndNewlines)
+        return v.isEmpty ? nil : v
+    }
+    private func saveAsConfig() {
+        if let name = promptName(title:t("保存为配置"),initial:model.suggestedConfigName,confirm:t("保存")) { model.saveConfig(named:name) }
+    }
+    private func renameConfig(_ c: StatusConfig) {
+        if let name = promptName(title:t("重命名配置"),initial:c.name,confirm:t("重命名")) { model.renameConfig(c.id,to:name) }
+    }
+    private func deleteConfig(_ c: StatusConfig) {
+        let alert = NSAlert(); alert.alertStyle = .warning
+        alert.messageText = t("删除配置「%@」？",c.name); alert.informativeText = t("此操作无法撤销。")
+        alert.addButton(withTitle:t("删除")).hasDestructiveAction = true
+        alert.addButton(withTitle:t("取消"))
+        NSApp.activate(ignoringOtherApps:true)
+        if alert.runModal() == .alertFirstButtonReturn { model.deleteConfig(c.id) }
+    }
+    private func exportConfigs() {
+        let panel = NSSavePanel(); panel.nameFieldStringValue = "esai-impulse-statusbar-configs.json"; panel.allowedContentTypes = [.json]
+        NSApp.activate(ignoringOtherApps:true)
+        if panel.runModal() == .OK, let url = panel.url { try? model.exportConfigs().write(to:url) }
+    }
+    private func importConfigs() {
+        let panel = NSOpenPanel(); panel.allowedContentTypes = [.json]; panel.allowsMultipleSelection = false
+        NSApp.activate(ignoringOtherApps:true)
+        guard panel.runModal() == .OK, let url = panel.url, let data = try? Data(contentsOf:url) else { return }
+        if !model.importConfigs(data) {
+            let a = NSAlert(); a.messageText = t("无法导入：文件不是有效的配置 JSON。"); a.runModal()
         }
     }
 

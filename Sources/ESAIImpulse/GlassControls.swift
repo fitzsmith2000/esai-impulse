@@ -122,6 +122,8 @@ extension View {
     func esaiGlassButton(prominent: Bool = false) -> some View { modifier(EsaiGlassButton(prominent:prominent)) }
 }
 
+enum EsaiRenderMode { static var offscreen = false }
+
 struct EsaiSegmentOption: Identifiable {
     let id: String
     let title: String
@@ -137,6 +139,23 @@ struct EsaiGlassSegments: View {
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Environment(\.colorScheme) private var colorScheme
     var body: some View {
+        if EsaiRenderMode.offscreen { offscreenStandIn } else { native }
+    }
+    /// Pure-SwiftUI look-alike used only by `--render-settings` (ImageRenderer can't draw AppKit views).
+    private var offscreenStandIn: some View {
+        HStack(spacing:0) {
+            ForEach(options) { o in
+                Text(o.title).font(.system(size:13,weight:o.id == selection ? .semibold : .medium))
+                    .foregroundStyle(o.id == selection ? accent : Color.primary)
+                    .frame(maxWidth:.infinity,maxHeight:.infinity)
+                    .background { if o.id == selection { Capsule().fill(accent.opacity(0.16)).padding(3) } }
+            }
+        }
+        .frame(height:34)
+        .background(.thinMaterial,in:Capsule())
+        .overlay(Capsule().strokeBorder(EsaiSurface.hairline.opacity(0.35),lineWidth:0.5))
+    }
+    private var native: some View {
         EsaiNativeSegments(selection:selection,options:options,accent:NSColor(accent),label:label,
             reduceMotion:reduceMotion,reduceTransparency:reduceTransparency,dark:colorScheme == .dark) { value in
             withTransaction(Transaction(animation:nil)) { selection = value }
