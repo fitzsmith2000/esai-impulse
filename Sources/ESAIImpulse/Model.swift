@@ -17,6 +17,7 @@ final class TrafficModel: ObservableObject {
     @Published private(set) var refreshing = false
     @Published private(set) var lastFailed = false
     @Published private(set) var statusStyle = StatusStyle.iconText
+    @Published private(set) var typography = StatusTypography.defaults
     @Published private(set) var hasCredentials = false
     @Published private(set) var savedLogin = ""
     @Published private(set) var lastRoute: Route?
@@ -50,6 +51,7 @@ final class TrafficModel: ObservableObject {
         if let data = defaults.data(forKey:"lastStats") { stats = try? JSONDecoder().decode(TrafficStats.self,from:data) }
         lastRefresh = defaults.object(forKey:"lastRefresh") as? Date
         statusStyle = StatusStyle(rawValue:defaults.string(forKey:"statusStyle") ?? "") ?? .iconText
+        typography = StatusTypography.load(defaults)
         let creds = CredentialStore.credentials
         hasCredentials = creds != nil; savedLogin = creds?.0 ?? ""
         loginEnabled = SMAppService.mainApp.status == .enabled
@@ -173,6 +175,13 @@ final class TrafficModel: ObservableObject {
     var routeText: String? {
         guard let route = lastRoute else { return nil }
         return translate(route == .direct ? "直连" : "系统网络")
+    }
+    func setTypography(_ t: StatusTypography) { typography = t.clamped(); typography.save(defaults) }
+    func resetTypography() { setTypography(.defaults) }
+    var previewSnapshot: StatusSnapshot {
+        if stats != nil { return statusSnapshot(spinPhase:nil) }
+        var s = StatusRenderer.sampleStates()[1].1
+        s.leftLabel = translate("剩余 %@"); s.usedLabel = translate("已用 %@"); return s
     }
     func setStatusStyle(_ style: StatusStyle) { statusStyle = style; defaults.set(style.rawValue,forKey:"statusStyle") }
     var stale: Bool { isStale(lastSuccess:lastRefresh, lastFailed:lastFailed, intervalMinutes:intervalMinutes) }

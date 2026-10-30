@@ -280,6 +280,33 @@ struct TrafficPanel: View {
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
             }
             EsaiHairline()
+            VStack(alignment:.leading,spacing:10) {
+                HStack {
+                    Text(t("状态栏")).font(.headline)
+                    Spacer()
+                    Button(t("恢复默认")) { model.resetTypography() }.font(.caption).esaiGlassButton()
+                        .disabled(model.typography == StatusTypography.defaults)
+                }
+                HStack(spacing:8) {
+                    ForEach([false,true],id:\.self) { dark in
+                        Image(nsImage:StatusRenderer.previewImage(model.previewSnapshot,style:model.statusStyle,typography:model.typography,dark:dark))
+                            .clipShape(RoundedRectangle(cornerRadius:6,style:.continuous))
+                    }
+                    Spacer(minLength:0)
+                }.accessibilityLabel(t("状态栏预览"))
+                typoSlider("字号",\.fontSize,StatusTypography.fontRange)
+                HStack(spacing:10) {
+                    Text(t("字重")).font(.callout.weight(.medium)).frame(width:96,alignment:.leading)
+                    EsaiGlassSegments(selection:Binding(get:{model.typography.weight.rawValue},set:{ var v = model.typography; v.weight = StatusWeight(rawValue:$0) ?? .semibold; model.setTypography(v) }),
+                        options:[.init(id:"regular",title:t("常规")),.init(id:"medium",title:t("中等")),.init(id:"semibold",title:t("半粗"))],accent:accent,label:t("字重"))
+                }
+                typoSlider("图标大小",\.iconSize,StatusTypography.iconRange)
+                typoSlider("图标与文字间距",\.spacing,StatusTypography.spacingRange)
+                typoSlider("两行字号",\.compactFontSize,StatusTypography.compactRange)
+                Text(t("默认值参考 Quosparr：图标 13 pt、文字 11 pt 半粗、两行 8.5 pt。修改即时生效。"))
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+            }.padding(12).esaiCard(.sunken)
+            EsaiHairline()
             VStack(alignment:.leading,spacing:8) {
                 Text(t("外观模式")).font(.headline)
                 EsaiGlassSegments(selection:Binding(get:{model.appearance},set:{model.setAppearance($0)}),options:[
@@ -347,6 +374,16 @@ struct TrafficPanel: View {
                         .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
                 }.padding(12).esaiCard(.sunken)
             }
+        }
+    }
+
+    private func typoSlider(_ title: String, _ key: WritableKeyPath<StatusTypography,Double>, _ range: ClosedRange<Double>) -> some View {
+        HStack(spacing:10) {
+            Text(t(title)).font(.callout.weight(.medium)).frame(width:96,alignment:.leading).lineLimit(1).minimumScaleFactor(0.8)
+            Slider(value:Binding(get:{ model.typography[keyPath:key] },set:{ var v = model.typography; v[keyPath:key] = $0; model.setTypography(v) }),in:range,step:0.5)
+                .controlSize(.small).accessibilityLabel(t(title))
+            Text(String(format:"%.1f pt",model.typography[keyPath:key])).font(.caption).monospacedDigit()
+                .foregroundStyle(.secondary).frame(width:48,alignment:.trailing)
         }
     }
 

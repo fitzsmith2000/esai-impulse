@@ -76,7 +76,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNU
     private func drawStatus() {
         guard let button = statusItem.button else { return }
         let snapshot = model.statusSnapshot(spinPhase:spinTimer == nil ? nil : spinPhase)
-        let image = StatusRenderer.image(snapshot, style:model.statusStyle)
+        let image = StatusRenderer.image(snapshot, style:model.statusStyle, typography:model.typography)
         button.title = ""; button.imagePosition = .imageOnly
         button.image = image
         statusItem.length = image.size.width + 8
@@ -222,7 +222,19 @@ enum SelfTest {
         precondition(isStale(lastSuccess:now.addingTimeInterval(-31*60), lastFailed:false, intervalMinutes:15, now:now))
         precondition(isStale(lastSuccess:now, lastFailed:true, intervalMinutes:15, now:now))
         precondition(!isStale(lastSuccess:nil, lastFailed:false, intervalMinutes:15, now:now))
-        precondition(StatusRenderer.size(for:StatusSnapshot(text:"-36 MB"), style:.iconText) == StatusRenderer.size(for:StatusSnapshot(text:"888.8 GB"), style:.iconText))
+        let d = StatusTypography.defaults
+        precondition(d.fontSize == 11 && d.weight == .semibold && d.iconSize == 13 && d.spacing == 4 && d.compactFontSize == 8.5)
+        let cl = StatusTypography(fontSize:20, weight:.regular, iconSize:30, spacing:-3, compactFontSize:5).clamped()
+        precondition(cl.fontSize == 14 && cl.iconSize == 20 && cl.spacing == 0 && cl.compactFontSize == 7)
+        let c2 = StatusTypography(fontSize:8.74, weight:.medium, iconSize:13.3, spacing:4.2, compactFontSize:9.26).clamped()
+        precondition(c2.fontSize == 9 && c2.iconSize == 13.5 && c2.spacing == 4 && c2.compactFontSize == 9.5)
+        precondition(d.clamped() == d)
+        for t in [d, cl] {
+            let a = StatusRenderer.size(for:StatusSnapshot(text:"-36 MB"), style:.iconText, typography:t)
+            precondition(a == StatusRenderer.size(for:StatusSnapshot(text:"888.8 GB"), style:.iconText, typography:t))
+            precondition(a.width == CGFloat(t.iconSize+t.spacing) + StatusRenderer.reservedTextWidth(t))
+        }
+        precondition(StatusRenderer.reservedTextWidth(d) < StatusRenderer.reservedTextWidth(cl))
         precondition(AlertLevel.of(leftGB:s.leftGB,threshold:200) == .depleted)
         precondition(AlertLevel.of(leftGB:150,threshold:200) == .low)
         precondition(alertTransition(previous:.normal,current:.low) == .low)
