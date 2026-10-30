@@ -22,6 +22,7 @@
 - **账号安全**：DataImpulse 登录名和密码只保存在 macOS 钥匙串，不写入文件、偏好设置或日志。
 - **与 esai 一致的界面**：Liquid Glass 面板（macOS 26+，旧系统使用兼容样式）、六种经典强调色与自定义 HEX、浅色/深色/跟随系统、3 pt 细滚动条、小号开关。
 - **双语**：简体中文、English，默认跟随系统语言。
+- **项目主页**：「设置 → 通用」点击应用名或 GitHub 按钮即可打开本项目页面。
 - **登录时启动**：基于 `SMAppService`，可在「设置 → 通用」开关。
 
 ## 安装
@@ -39,8 +40,10 @@
 需要 Apple Silicon Mac 和 Command Line Tools（Swift 5.9+），无需完整 Xcode：
 
 ```sh
-./build.sh          # swift build -c release + 组装并 ad-hoc 签名 build/ESAI Impulse.app
+./build.sh   # 用 swiftc 编译、运行自检，组装并 ad-hoc 签名 build/ESAI Impulse.app
 ```
+
+`build.sh` 默认直接调用 `swiftc`（部分 Command Line Tools 自带的 SwiftPM 清单库不兼容）。安装了完整 Xcode 时，可用 `USE_SWIFTPM=1 ./build.sh` 改走 `swift build -c release`。
 
 ## 许可
 

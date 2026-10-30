@@ -52,6 +52,6 @@ enum L10n {
         "当前剩余 %@，已超额 %@。":"%@ left, overdrawn by %@.",
         "账号或密码错误（401）":"Wrong login or password (401)", "网络错误：%@":"Network error: %@",
         "服务器返回 HTTP %@":"Server returned HTTP %@", "无法解析返回数据":"Could not parse the response",
-        "仅显示信息，不会执行任何操作。":"Informational only."
+        "仅显示信息，不会执行任何操作。":"Informational only.", "在 GitHub 上查看项目":"View project on GitHub"
     ]
 }

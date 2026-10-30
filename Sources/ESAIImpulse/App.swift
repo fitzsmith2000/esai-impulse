@@ -30,6 +30,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNU
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        // LSUIElement apps get no main menu; without one Cmd+V/C/X/A/Z never reach text fields.
+        NSApp.mainMenu = EditMenu.make()
         UNUserNotificationCenter.current().delegate = self
         model = TrafficModel()
         statusItem = NSStatusBar.system.statusItem(withLength:NSStatusItem.variableLength)
@@ -142,6 +144,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNU
     }
 }
 
+enum EditMenu {
+    static func make() -> NSMenu {
+        let main = NSMenu()
+        let appItem = NSMenuItem(); main.addItem(appItem)
+        let appMenu = NSMenu(title:"ESAI Impulse")
+        appMenu.addItem(withTitle:"Quit ESAI Impulse",action:#selector(NSApplication.terminate(_:)),keyEquivalent:"q")
+        appItem.submenu = appMenu
+        let editItem = NSMenuItem(); main.addItem(editItem)
+        let edit = NSMenu(title:"Edit")
+        edit.addItem(withTitle:"Undo",action:Selector(("undo:")),keyEquivalent:"z")
+        let redo = edit.addItem(withTitle:"Redo",action:Selector(("redo:")),keyEquivalent:"z")
+        redo.keyEquivalentModifierMask = [.command,.shift]
+        edit.addItem(.separator())
+        edit.addItem(withTitle:"Cut",action:#selector(NSText.cut(_:)),keyEquivalent:"x")
+        edit.addItem(withTitle:"Copy",action:#selector(NSText.copy(_:)),keyEquivalent:"c")
+        edit.addItem(withTitle:"Paste",action:#selector(NSText.paste(_:)),keyEquivalent:"v")
+        edit.addItem(withTitle:"Select All",action:#selector(NSText.selectAll(_:)),keyEquivalent:"a")
+        editItem.submenu = edit
+        return main
+    }
+}
+
 enum SelfTest {
     static func run() {
         let json = #"{"total_traffic":4522600562688,"traffic_used":4522636562688,"traffic_left":-36000000,"used_threads":0,"status":"ok"}"#
@@ -156,6 +180,10 @@ enum SelfTest {
         precondition(alertTransition(previous:.low,current:.low) == nil)
         precondition(alertTransition(previous:.low,current:.depleted) == .depleted)
         precondition(alertTransition(previous:.depleted,current:.depleted) == nil)
+        let edit = EditMenu.make().items[1].submenu!
+        for (key,sel) in [("v","paste:"),("c","copy:"),("x","cut:"),("a","selectAll:"),("z","undo:")] {
+            precondition(edit.items.contains { $0.keyEquivalent == key && $0.action == Selector((sel)) && $0.keyEquivalentModifierMask == .command })
+        }
         print("SELF_TEST_OK")
     }
 }

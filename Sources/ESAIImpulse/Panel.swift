@@ -353,17 +353,29 @@ struct TrafficPanel: View {
             }
             EsaiHairline()
             HStack(spacing:8) {
-                if let image = NSImage(named:"AppIcon") { Image(nsImage:image).resizable().frame(width:36,height:36) }
-                VStack(alignment:.leading,spacing:2) {
-                    Text("ESAI Impulse").font(.callout.weight(.medium))
-                    Text(t("版本 %@",Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0")).font(.caption).foregroundStyle(.secondary)
-                }
+                Button { openProjectPage() } label: {
+                    HStack(spacing:8) {
+                        if let image = NSImage(named:"AppIcon") { Image(nsImage:image).resizable().frame(width:36,height:36) }
+                        VStack(alignment:.leading,spacing:2) {
+                            Text("ESAI Impulse").font(.callout.weight(.medium))
+                            Text(t("版本 %@",Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.1")).font(.caption).foregroundStyle(.secondary)
+                        }
+                    }.contentShape(Rectangle())
+                }.buttonStyle(.plain).pointingHandCursor().help(t("在 GitHub 上查看项目"))
                 Spacer()
+                Button { openProjectPage() } label: {
+                    Label("GitHub",systemImage:"arrow.up.right.square").font(.caption.weight(.medium))
+                }.buttonStyle(.plain).foregroundStyle(accent).pointingHandCursor()
+                    .help(t("在 GitHub 上查看项目")).accessibilityLabel(t("在 GitHub 上查看项目"))
                 Button(t("开源许可")) {
                     if let url = Bundle.main.url(forResource:"THIRD_PARTY_NOTICES",withExtension:"md") { NSWorkspace.shared.open(url) }
-                }.buttonStyle(.plain).font(.caption).foregroundStyle(.secondary)
+                }.buttonStyle(.plain).font(.caption).foregroundStyle(.secondary).pointingHandCursor()
             }
         }
+    }
+
+    private func openProjectPage() {
+        if let url = URL(string:"https://github.com/fitzsmith2000/esai-impulse") { NSWorkspace.shared.open(url) }
     }
 
     private func openSettings(_ tab: String) { navigation.settingsTab = tab; navigation.showingSettings = true }
