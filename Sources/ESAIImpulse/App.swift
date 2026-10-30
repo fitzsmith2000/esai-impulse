@@ -57,9 +57,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNU
 
     private func updateStatusItem() {
         guard let button = statusItem.button else { return }
-        let image = NSImage(systemSymbolName:"antenna.radiowaves.left.and.right",accessibilityDescription:"ESAI Impulse")
-        image?.isTemplate = true
-        button.image = image?.withSymbolConfiguration(.init(pointSize:13,weight:.medium))
+        if button.image == nil {
+            let image = Bundle.main.url(forResource:"StatusTemplate",withExtension:"pdf").flatMap(NSImage.init(contentsOf:))
+                ?? NSImage(systemSymbolName:"antenna.radiowaves.left.and.right",accessibilityDescription:"ESAI Impulse")
+            image?.size = NSSize(width:18,height:18); image?.isTemplate = true
+            image?.accessibilityDescription = "ESAI Impulse"
+            button.image = image
+        }
         let text: String; var color: NSColor? = nil
         if let left = model.leftGB {
             text = " " + statusText(leftGB:left)

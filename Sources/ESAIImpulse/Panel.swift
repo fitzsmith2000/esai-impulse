@@ -61,7 +61,9 @@ struct TrafficPanel: View {
                 EsaiDetailBackButton(title:t("返回")) { navigation.showingSettings = false }
                 Text(t("设置")).font(.title3.weight(.semibold))
             } else {
-                Image(systemName:"antenna.radiowaves.left.and.right").font(.system(size:15,weight:.semibold)).foregroundStyle(accent)
+                if let url = Bundle.main.url(forResource:"StatusTemplate",withExtension:"pdf"), let image = NSImage(contentsOf:url) {
+                    Image(nsImage:image).resizable().renderingMode(.template).foregroundStyle(accent).frame(width:19,height:19)
+                }
                 Text("ESAI Impulse").font(.title3.weight(.semibold))
                 Text(levelTitle).font(.caption.weight(.semibold))
                     .foregroundStyle(model.stats == nil ? Color.secondary : levelColor)

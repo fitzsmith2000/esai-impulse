@@ -19,12 +19,8 @@ fi
 rm -rf "$app"; mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/Licenses"
 cp "$bin" "$app/Contents/MacOS/ESAIImpulse"
 cp Resources/Info.plist "$app/Contents/Info.plist"
-if [[ ! -f build/AppIcon.icns ]]; then
-  rm -rf build/AppIcon.iconset
-  swift Scripts/make-icon.swift build/AppIcon.iconset
-  iconutil -c icns build/AppIcon.iconset -o build/AppIcon.icns
-fi
-cp build/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
+cp Resources/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
+cp Resources/StatusTemplate.pdf "$app/Contents/Resources/StatusTemplate.pdf"
 cp Resources/Licenses/* "$app/Contents/Resources/Licenses/"
 cp THIRD_PARTY_NOTICES.md LICENSE "$app/Contents/Resources/"
 codesign --force --deep -s - "$app"
