@@ -171,7 +171,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNU
         if let i = CommandLine.arguments.firstIndex(of:"--render-statusbar") {
             let folder = CommandLine.arguments.count > i+1 ? CommandLine.arguments[i+1] : "/tmp/esai-impulse-statusbar"
             _ = NSApplication.shared
-            StatusRenderer.renderPreviews(to:folder); return
+            let a = CommandLine.arguments
+            func num(_ k: String) -> Double? { a.firstIndex(of:k).flatMap { a.count > $0+1 ? Double(a[$0+1]) : nil } }
+            var t = StatusTypography.defaults
+            if let v = num("--font") { t.fontSize = v }
+            if let v = num("--icon") { t.iconSize = v }
+            if let v = num("--spacing") { t.spacing = v }
+            if let v = num("--compact") { t.compactFontSize = v }
+            if let w = a.firstIndex(of:"--weight").flatMap({ a.count > $0+1 ? StatusWeight(rawValue:a[$0+1]) : nil }) { t.weight = w }
+            StatusRenderer.renderPreviews(to:folder, typography:t.clamped()); return
         }
         if CommandLine.arguments.contains("--probe") { CLI.probe(); return }
         if CommandLine.arguments.contains("--refresh-once") { CLI.refreshOnce(); return }
@@ -223,7 +231,7 @@ enum SelfTest {
         precondition(isStale(lastSuccess:now, lastFailed:true, intervalMinutes:15, now:now))
         precondition(!isStale(lastSuccess:nil, lastFailed:false, intervalMinutes:15, now:now))
         let d = StatusTypography.defaults
-        precondition(d.fontSize == 11 && d.weight == .semibold && d.iconSize == 13 && d.spacing == 4 && d.compactFontSize == 8.5)
+        precondition(d.fontSize == 10.5 && d.weight == .regular && d.iconSize == 19 && d.spacing == 9 && d.compactFontSize == 8.5)
         let cl = StatusTypography(fontSize:20, weight:.regular, iconSize:30, spacing:-3, compactFontSize:5).clamped()
         precondition(cl.fontSize == 14 && cl.iconSize == 20 && cl.spacing == 0 && cl.compactFontSize == 7)
         let c2 = StatusTypography(fontSize:8.74, weight:.medium, iconSize:13.3, spacing:4.2, compactFontSize:9.26).clamped()

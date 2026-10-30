@@ -39,20 +39,20 @@ struct StatusSnapshot {
     var usedLabel = "已用 %@"
 }
 
-// MARK: - Typography (user adjustable; defaults derived from Quosparr's tray_render.go)
+// MARK: - Typography (user adjustable; v1.1.2 defaults chosen by Fitz)
 
 enum StatusWeight: String, CaseIterable { case regular, medium, semibold
     var nsWeight: NSFont.Weight { switch self { case .regular: return .regular; case .medium: return .medium; case .semibold: return .semibold } }
 }
 
 struct StatusTypography: Equatable {
-    /// Quosparr: single-line meter text 11 pt, weight 600, tabular digits.
-    var fontSize: Double = 11
-    var weight: StatusWeight = .semibold
-    /// Quosparr: provider logo 13 pt (trayIconSize), followed by a 4 pt gap.
-    var iconSize: Double = 13
-    var spacing: Double = 4
-    /// Quosparr: stacked rows 8.5 pt / 600 at row centres 6 and 16 of a 22 pt canvas.
+    /// v1.1.2 defaults (chosen by Fitz): 10.5 pt regular text with tabular digits.
+    var fontSize: Double = 10.5
+    var weight: StatusWeight = .regular
+    /// 19 pt ring icon followed by a 9 pt gap.
+    var iconSize: Double = 19
+    var spacing: Double = 9
+    /// Stacked rows 8.5 pt at row centres 6 and 16 of a 22 pt canvas.
     var compactFontSize: Double = 8.5
 
     static let defaults = StatusTypography()
@@ -89,7 +89,7 @@ struct StatusTypography: Equatable {
     var compactLabelFont: NSFont { NSFont.systemFont(ofSize:max(6, compactFontSize-0.5), weight:.medium) }
 }
 
-// MARK: - Drawing (22 pt canvas like Quosparr; vertical centring on ascent+descent)
+// MARK: - Drawing (22 pt canvas; text centred on cap height, icon on the same midline y=11)
 
 enum StatusRenderer {
     static let flowerPath = "M 8.68000 6.95000 L 8.06000 1.69000 C 8.06000 1.17085 8.48085 0.75000 9.00000 0.75000 C 9.51915 0.75000 9.94000 1.17085 9.94000 1.69000 L 9.32000 6.95000 Q 9.43500 7.37500 9.74787 7.06465 L 11.84094 2.19935 C 12.10051 1.74976 12.67540 1.59572 13.12500 1.85529 C 13.57460 2.11486 13.72864 2.68976 13.46906 3.13935 L 10.30213 7.38465 Q 10.18922 7.81021 10.61535 7.69787 L 14.86065 4.53094 C 15.31024 4.27136 15.88514 4.42540 16.14471 4.87500 C 16.40428 5.32460 16.25024 5.89949 15.80065 6.15906 L 10.93535 8.25213 Q 10.62479 8.56422 11.05000 8.68000 L 16.31000 8.06000 C 16.82915 8.06000 17.25000 8.48085 17.25000 9.00000 C 17.25000 9.51915 16.82915 9.94000 16.31000 9.94000 L 11.05000 9.32000 Q 10.62500 9.43500 10.93535 9.74787 L 15.80065 11.84094 C 16.25024 12.10051 16.40428 12.67540 16.14471 13.12500 C 15.88514 13.57460 15.31024 13.72864 14.86065 13.46906 L 10.61535 10.30213 Q 10.18979 10.18922 10.30213 10.61535 L 13.46906 14.86065 C 13.72864 15.31024 13.57460 15.88514 13.12500 16.14471 C 12.67540 16.40428 12.10051 16.25024 11.84094 15.80065 L 9.74787 10.93535 Q 9.43578 10.62479 9.32000 11.05000 L 9.94000 16.31000 C 9.94000 16.82915 9.51915 17.25000 9.00000 17.25000 C 8.48085 17.25000 8.06000 16.82915 8.06000 16.31000 L 8.68000 11.05000 Q 8.56500 10.62500 8.25213 10.93535 L 6.15906 15.80065 C 5.89949 16.25024 5.32460 16.40428 4.87500 16.14471 C 4.42540 15.88514 4.27136 15.31024 4.53094 14.86065 L 7.69787 10.61535 Q 7.81078 10.18979 7.38465 10.30213 L 3.13935 13.46906 C 2.68976 13.72864 2.11486 13.57460 1.85529 13.12500 C 1.59572 12.67540 1.74976 12.10051 2.19935 11.84094 L 7.06465 9.74787 Q 7.37521 9.43578 6.95000 9.32000 L 1.69000 9.94000 C 1.17085 9.94000 0.75000 9.51915 0.75000 9.00000 C 0.75000 8.48085 1.17085 8.06000 1.69000 8.06000 L 6.95000 8.68000 Q 7.37500 8.56500 7.06465 8.25213 L 2.19935 6.15906 C 1.74976 5.89949 1.59572 5.32460 1.85529 4.87500 C 2.11486 4.42540 2.68976 4.27136 3.13935 4.53094 L 7.38465 7.69787 Q 7.81021 7.81078 7.69787 7.38465 L 4.53094 3.13935 C 4.27136 2.68976 4.42540 2.11486 4.87500 1.85529 C 5.32460 1.59572 5.89949 1.74976 6.15906 2.19935 L 8.25213 7.06465 Q 8.56422 7.37521 8.68000 6.95000 Z"
@@ -170,14 +170,30 @@ enum StatusRenderer {
         ctx.restoreGState()
     }
 
-    /// Draws `text` with its ascent+descent box centred on `cy` (bottom-up), like Quosparr's trayPen.text.
+    /// Snaps to the device pixel grid (half points on Retina).
+    static func snap(_ v: CGFloat, scale: CGFloat = 2) -> CGFloat { (v*scale).rounded()/scale }
+
+    /// Baseline that puts the optical centre of digits / capitals ("-36 MB", "128 GB") on `cy`.
+    /// Uses the font's cap height (SF digits are cap-height tall) instead of the
+    /// ascender+descender line box, whose centre sits above the glyphs the eye reads.
+    static func baseline(centeredOn cy: CGFloat, font: NSFont) -> CGFloat {
+        ((cy - font.capHeight/2)*2).rounded(.down)/2
+    }
+
+    /// Draws `text` with its cap-height band centred on `cy` (bottom-up), baseline pixel-aligned.
     @discardableResult
     static func drawText(_ text: String, x: CGFloat, cy: CGFloat, font: NSFont, color: NSColor) -> CGFloat {
         let attrs: [NSAttributedString.Key:Any] = [.font:font, .foregroundColor:color]
-        let baseline = cy - (font.ascender + font.descender)/2
-        let str = text as NSString
-        str.draw(at:NSPoint(x:x, y:baseline + font.descender), withAttributes:attrs)
-        return ceil(str.size(withAttributes:attrs).width)
+        let str = NSAttributedString(string:text, attributes:attrs)
+        let line = CTLineCreateWithAttributedString(str)
+        if let ctx = NSGraphicsContext.current?.cgContext {
+            ctx.saveGState()
+            ctx.textMatrix = .identity
+            ctx.textPosition = CGPoint(x:snap(x), y:baseline(centeredOn:cy, font:font))
+            CTLineDraw(line, ctx)
+            ctx.restoreGState()
+        }
+        return ceil(CTLineGetTypographicBounds(line, nil, nil, nil))
     }
 
     static func size(for s: StatusSnapshot, style: StatusStyle, typography t: StatusTypography) -> NSSize {
@@ -215,9 +231,9 @@ enum StatusRenderer {
 
     static func draw(_ s: StatusSnapshot, style: StatusStyle, typography t: StatusTypography, in rect: NSRect, fg: NSColor) {
         let icon = CGFloat(t.iconSize), gap = CGFloat(t.spacing)
-        drawIcon(s, at:NSPoint(x:rect.minX, y:rect.minY+(height-icon)/2), size:icon, fg:fg)
+        drawIcon(s, at:NSPoint(x:rect.minX, y:rect.minY+snap((height-icon)/2)), size:icon, fg:fg)
         let ink = s.stale ? fg.withAlphaComponent(0.5) : fg
-        let x = rect.minX + icon + gap
+        let x = snap(rect.minX + icon + gap)
         switch style {
         case .icon: break
         case .iconText:

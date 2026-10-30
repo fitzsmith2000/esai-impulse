@@ -303,7 +303,7 @@ struct TrafficPanel: View {
                 typoSlider("图标大小",\.iconSize,StatusTypography.iconRange)
                 typoSlider("图标与文字间距",\.spacing,StatusTypography.spacingRange)
                 typoSlider("两行字号",\.compactFontSize,StatusTypography.compactRange)
-                Text(t("默认值参考 Quosparr：图标 13 pt、文字 11 pt 半粗、两行 8.5 pt。修改即时生效。"))
+                Text(t("默认值：文字 10.5 pt 常规、图标 19 pt、间距 9 pt、两行 8.5 pt。修改即时生效。"))
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
             }.padding(12).esaiCard(.sunken)
             EsaiHairline()
