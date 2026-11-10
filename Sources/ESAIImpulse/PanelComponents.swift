@@ -299,9 +299,19 @@ struct EsaiSwitchRow: View {
         HStack(spacing:12) {
             Text(title).font(.callout.weight(.medium))
             Spacer(minLength:12)
-            Toggle(title,isOn:$isOn)
-                .labelsHidden().toggleStyle(.switch).controlSize(.small).fixedSize()
-                .accessibilityLabel(title)
+            if EsaiRenderMode.offscreen {
+                Capsule().fill(isOn ? Color.accentColor : Color.secondary.opacity(0.25))
+                    .frame(width:32,height:18)
+                    .overlay(alignment:isOn ? .trailing : .leading) {
+                        Circle().fill(Color.white).frame(width:14,height:14).padding(2)
+                    }
+                    .accessibilityLabel(title)
+                    .accessibilityAddTraits(isOn ? .isSelected : [])
+            } else {
+                Toggle(title,isOn:$isOn)
+                    .labelsHidden().toggleStyle(.switch).controlSize(.small).fixedSize()
+                    .accessibilityLabel(title)
+            }
         }.frame(maxWidth:.infinity,alignment:.leading)
     }
 }

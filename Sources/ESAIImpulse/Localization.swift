@@ -96,6 +96,10 @@ enum L10n {
         "今日用量达到该值时发送一次系统通知。设为 0 表示关闭，默认关闭。":"Sends one notification on a Singapore day when today's usage reaches this amount. Set to 0 to turn it off (the default).",
         "DataImpulse 今日用量已达阈值":"DataImpulse daily usage reached your threshold",
         "今日已用 %@，超过 %@ GB 的每日提醒。":"%@ used today, above your %@ GB daily alert.",
-        "用量历史…":"Usage History…"
+        "用量历史…":"Usage History…",
+        "剩余":"Remaining",
+        "还没有用量记录":"No usage recorded yet",
+        "刷新一次后，会从今天开始按新加坡时间 10:00 记每天的用量。":"After a refresh, daily usage is recorded from today, with days starting at 10:00 Singapore time.",
+        "配置名称":"Configuration name"
     ]
 }

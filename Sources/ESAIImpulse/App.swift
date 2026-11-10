@@ -143,7 +143,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNU
         focusPanel(); stopMonitors()
         localMonitor = NSEvent.addLocalMonitorForEvents(matching:[.leftMouseDown,.rightMouseDown,.keyDown]) { [weak self] event in
             guard let self = self, self.popover.isShown else { return event }
-            if event.type == .keyDown { if event.keyCode == 53 { self.popover.performClose(nil); return nil }; return event }
+            if event.type == .keyDown {
+                if event.keyCode == 53 { return self.handlePopoverEscape(event) }
+                return event
+            }
             guard let window = self.popover.contentViewController?.view.window else { return event }
             if event.window === window || event.window === self.statusItem.button?.window || event.window?.sheetParent === window { return event }
             if let other = event.window, other is NSPanel || other.level > .normal { return event }
@@ -151,6 +154,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNU
         }
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching:[.leftMouseDown,.rightMouseDown]) { [weak self] _ in self?.popover.performClose(nil) }
         resignObserver = NotificationCenter.default.addObserver(forName:NSApplication.didResignActiveNotification,object:NSApp,queue:.main) { [weak self] _ in self?.popover.performClose(nil) }
+    }
+    /// Esc closes the panel, but not while IME is composing, and not when another window (alert, save panel) is key.
+    /// If a text field is focused, the first Esc just resigns focus.
+    private func handlePopoverEscape(_ event: NSEvent) -> NSEvent? {
+        let popoverWindow = popover.contentViewController?.view.window
+        if let key = event.window ?? NSApp.keyWindow, let popoverWindow, key !== popoverWindow, key !== statusItem.button?.window {
+            return event
+        }
+        if let text = NSApp.keyWindow?.firstResponder as? NSTextView, text.hasMarkedText() {
+            return event
+        }
+        if let window = popoverWindow, window.firstResponder is NSTextView || window.firstResponder is NSTextField {
+            window.makeFirstResponder(nil)
+            return nil
+        }
+        popover.performClose(nil)
+        return nil
     }
     func popoverDidClose(_ notification: Notification) { stopMonitors() }
     private func stopMonitors() {
@@ -206,6 +226,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNU
         if let i = CommandLine.arguments.firstIndex(of:"--render-usage") {
             let folder = CommandLine.arguments.count > i+1 ? CommandLine.arguments[i+1] : "/tmp/esai-impulse-usage"
             MainActor.assumeIsolated { UsageRender.run(to:folder, dark:CommandLine.arguments.contains("--dark")) }; return
+        }
+        if let i = CommandLine.arguments.firstIndex(of:"--render-qa") {
+            let folder = CommandLine.arguments.count > i+1 ? CommandLine.arguments[i+1] : "/tmp/esai-impulse-qa"
+            MainActor.assumeIsolated { QARender.run(to:folder) }; return
         }
         if CommandLine.arguments.contains("--probe") { CLI.probe(); return }
         if CommandLine.arguments.contains("--refresh-once") { CLI.refreshOnce(); return }

@@ -306,6 +306,13 @@ enum UsageChartLayout {
         let nice = steps.first(where:{ $0+1e-9 >= mantissa }) ?? 10
         return nice*pow10
     }
+    /// Keep a hover chip's center inside [inset+half, total-inset-half].
+    static func clampCenter(_ x: Double, half: Double, total: Double, inset: Double = 4) -> Double {
+        let lo = inset+half
+        let hi = total-inset-half
+        if hi <= lo { return total/2 }
+        return min(max(x,lo),hi)
+    }
 }
 
 // MARK: - Runout policy
@@ -470,11 +477,9 @@ enum UsageSample {
             if incomplete {
                 used += (gb*1e9)/2
                 _ = s.record(used:used,total:total,left:total-used,at:start.addingTimeInterval(2*3600))
-                // 4-hour gap still inside the same usage day; leftover usage lands on this day.
                 used += (gb*1e9)/2
                 _ = s.record(used:used,total:total,left:total-used,at:start.addingTimeInterval(6*3600))
-                let endish = start.addingTimeInterval(23*3600)
-                _ = s.record(used:used,total:total,left:total-used,at:endish)
+                // No end-of-day snapshot: the day is incomplete (legend "米色为不完整").
             } else if id == "2026-11-09" {
                 used += gb*1e9
                 _ = s.record(used:used,total:total,left:total-used,at:sampleNow)
@@ -694,5 +699,16 @@ enum UsageTests {
         precondition(UsageMath.barHoverLabel(day:missing,language:.chinese) == "11月8日 · — · 无数据")
         let complete = UsageDay(id:"2026-11-07", usedBytes:98.4e9, isToday:false)
         precondition(UsageMath.barHoverLabel(day:complete,language:.chinese) == "11月7日 · 98.4 GB")
+        precondition(UsageMath.formatDayID("2026-11-09",language:.chinese) == "11月9日")
+        precondition(UsageMath.formatDayID("2026-11-09",language:.english) == "Nov 9")
+        precondition(abs(UsageChartLayout.clampCenter(0,half:40,total:200) - 44) < 0.01)
+        precondition(abs(UsageChartLayout.clampCenter(200,half:40,total:200) - 156) < 0.01)
+        precondition(abs(UsageChartLayout.clampCenter(100,half:40,total:200) - 100) < 0.01)
+        // English map covers keys shown on every usage surface, including short card titles.
+        for key in ["剩余","今日已用","今日","不完整","无数据","用量历史","导出 CSV","配置名称","还没有用量记录"] {
+            precondition(L10n.english[key] != nil, "missing English for \(key)")
+        }
+        let nov6 = UsageSample.store().days(now:UsageSample.sampleNow).first { $0.id == "2026-11-06" }
+        precondition(nov6?.isIncomplete == true)
     }
 }

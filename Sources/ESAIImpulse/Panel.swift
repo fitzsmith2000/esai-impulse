@@ -195,10 +195,8 @@ struct TrafficPanel: View {
         }.onChange(of:model.accentHex) { customHex = $0; hexError = false }
     }
 
-    private func field<F: View>(_ field: F) -> some View {
-        field.textFieldStyle(.plain).font(.callout).padding(.horizontal,12).frame(height:34)
-            .background(EsaiSurface.sunken,in:Capsule())
-            .overlay(Capsule().strokeBorder(EsaiSurface.hairline.opacity(0.4),lineWidth:0.5))
+    private func field<F: View>(_ field: F, text: Binding<String>? = nil, clearable: Bool = false) -> some View {
+        EsaiFocusField(accent:accent,text:text,clearable:clearable) { field.font(.callout) }
     }
     private var accountEditor: some View {
         VStack(alignment:.leading,spacing:14) {
@@ -209,9 +207,9 @@ struct TrafficPanel: View {
             }
             VStack(alignment:.leading,spacing:6) {
                 Text(t("登录名")).font(.caption.weight(.medium)).foregroundStyle(.secondary)
-                field(TextField(t("登录名"),text:$loginDraft).disableAutocorrection(true))
+                field(TextField(t("登录名"),text:$loginDraft).disableAutocorrection(true).textContentType(.username),text:$loginDraft,clearable:true)
                 Text(t("密码")).font(.caption.weight(.medium)).foregroundStyle(.secondary).padding(.top,4)
-                field(SecureField(model.hasCredentials ? "••••••••" : t("密码"),text:$passwordDraft).onSubmit(saveCredentials))
+                field(SecureField(model.hasCredentials ? "••••••••" : t("密码"),text:$passwordDraft).textContentType(.password).onSubmit(saveCredentials),text:$passwordDraft,clearable:true)
             }
             HStack {
                 Button(t("保存并刷新"),action:saveCredentials).esaiGlassButton(prominent:true)
@@ -261,7 +259,7 @@ struct TrafficPanel: View {
                     Text(t("提醒阈值")).font(.callout.weight(.medium))
                     Spacer()
                     field(TextField("200",text:$thresholdDraft).multilineTextAlignment(.trailing).monospacedDigit()
-                        .onSubmit(applyThreshold)).frame(width:96)
+                        .onSubmit(applyThreshold),text:$thresholdDraft).frame(width:108)
                     Text("GB").font(.callout).foregroundStyle(.secondary)
                     Button(t("应用"),action:applyThreshold).font(.caption).esaiGlassButton()
                 }
@@ -282,7 +280,7 @@ struct TrafficPanel: View {
                     Text(t("提前几天提醒")).font(.callout.weight(.medium))
                     Spacer()
                     field(TextField("10",text:$runoutDraft).multilineTextAlignment(.trailing).monospacedDigit()
-                        .onSubmit(applyRunoutDays)).frame(width:96)
+                        .onSubmit(applyRunoutDays),text:$runoutDraft).frame(width:108)
                     Text(t("天")).font(.callout).foregroundStyle(.secondary)
                     Button(t("应用"),action:applyRunoutDays).font(.caption).esaiGlassButton()
                 }
@@ -302,7 +300,7 @@ struct TrafficPanel: View {
                     Text(t("每日阈值")).font(.callout.weight(.medium))
                     Spacer()
                     field(TextField("0",text:$dailyDraft).multilineTextAlignment(.trailing).monospacedDigit()
-                        .onSubmit(applyDailyThreshold)).frame(width:96)
+                        .onSubmit(applyDailyThreshold),text:$dailyDraft).frame(width:108)
                     Text("GB").font(.callout).foregroundStyle(.secondary)
                     Button(t("应用"),action:applyDailyThreshold).font(.caption).esaiGlassButton()
                 }
@@ -326,10 +324,50 @@ struct TrafficPanel: View {
         dailyDraft = model.dailyThresholdText
     }
 
-    /// Settings → 外观 without the scroll host, for `--render-settings`.
-    var appearanceForRender: some View {
-        appearanceEditor.padding(16).frame(width:model.panelSize.width,alignment:.topLeading)
-            .tint(accent).preferredColorScheme(model.colorScheme).environment(\.locale,model.resolvedLanguage.locale)
+    /// Settings tab without the scroll host, for offscreen renders.
+    func settingsTabForRender(_ tab: String) -> some View {
+        Group {
+            if tab == "account" { accountEditor }
+            else if tab == "alerts" { alertsEditor }
+            else if tab == "appearance" { appearanceEditor }
+            else { generalSettings }
+        }
+        .padding(16).frame(width:model.panelSize.width,alignment:.topLeading)
+        .tint(accent).preferredColorScheme(model.colorScheme).environment(\.locale,model.resolvedLanguage.locale)
+    }
+    var appearanceForRender: some View { settingsTabForRender("appearance") }
+    private var colorPicker: some View {
+        Group {
+            if EsaiRenderMode.offscreen {
+                HStack(spacing:6) {
+                    RoundedRectangle(cornerRadius:4,style:.continuous).fill(model.selectedAccent).frame(width:22,height:16)
+                        .overlay(RoundedRectangle(cornerRadius:4).strokeBorder(Color.secondary.opacity(0.3)))
+                    Text(t("自定义颜色")).font(.caption)
+                }
+            } else {
+                ColorPicker(t("自定义颜色"),selection:Binding(get:{model.selectedAccent},set:{model.setAccentColor($0)}),supportsOpacity:false)
+                    .font(.caption)
+            }
+        }.accessibilityLabel(t("自定义强调色取色器"))
+    }
+    private var hexField: some View {
+        Group {
+            if EsaiRenderMode.offscreen {
+                Text(customHex.isEmpty ? "#RRGGBB" : customHex)
+                    .font(.system(size:11,design:.monospaced))
+                    .foregroundStyle(customHex.isEmpty ? Color.secondary : Color.primary)
+                    .padding(.horizontal,10).frame(width:120,height:30)
+                    .background(EsaiSurface.sunken,in:Capsule())
+            } else {
+                EsaiFocusField(accent:accent,text:$customHex,clearable:true,height:30) {
+                    TextField("#RRGGBB",text:$customHex)
+                        .font(.system(size:11,design:.monospaced))
+                        .onSubmit { applyCustomHex() }
+                }
+                .frame(width:120)
+                .accessibilityLabel(t("强调色 HEX 色值"))
+            }
+        }
     }
     private var appearanceEditor: some View {
         VStack(alignment:.leading,spacing:16) {
@@ -415,14 +453,9 @@ struct TrafficPanel: View {
                     }
                 }
                 HStack {
-                    ColorPicker(t("自定义颜色"),selection:Binding(get:{model.selectedAccent},set:{model.setAccentColor($0)}),supportsOpacity:false)
-                        .font(.caption).accessibilityLabel(t("自定义强调色取色器"))
+                    colorPicker
                     Spacer(minLength:8)
-                    TextField("#RRGGBB",text:$customHex)
-                        .font(.system(size:11,design:.monospaced)).textFieldStyle(.plain)
-                        .padding(.horizontal,10).frame(width:86,height:30)
-                        .background(EsaiSurface.sunken,in:Capsule())
-                        .onSubmit { applyCustomHex() }.accessibilityLabel(t("强调色 HEX 色值"))
+                    hexField
                     Button(t("应用")) { applyCustomHex() }.font(.caption).esaiGlassButton()
                 }
                 if hexError { Text(t("请输入六位 HEX 色值，例如 #2878ED。")).font(.caption).foregroundStyle(.red) }
@@ -443,7 +476,7 @@ struct TrafficPanel: View {
 
     private func typoSlider(_ title: String, _ key: WritableKeyPath<StatusTypography,Double>, _ range: ClosedRange<Double>) -> some View {
         HStack(spacing:10) {
-            Text(t(title)).font(.callout.weight(.medium)).frame(width:96,alignment:.leading).lineLimit(1).minimumScaleFactor(0.8)
+            Text(t(title)).font(.callout.weight(.medium)).frame(width:112,alignment:.leading).lineLimit(2).minimumScaleFactor(0.8)
             Slider(value:Binding(get:{ model.typography[keyPath:key] },set:{ var v = model.typography; v[keyPath:key] = $0; model.setTypography(v) }),in:range,step:0.5)
                 .controlSize(.small).accessibilityLabel(t(title))
             Text(String(format:"%.1f pt",model.typography[keyPath:key])).font(.caption).monospacedDigit()
@@ -457,7 +490,7 @@ struct TrafficPanel: View {
         let value = model.typography.textOffset
         func set(_ v: Double) { var t = model.typography; t.textOffset = v; model.setTypography(t) }
         return HStack(spacing:10) {
-            Text(t("文字上下偏移")).font(.callout.weight(.medium)).frame(width:96,alignment:.leading).lineLimit(1).minimumScaleFactor(0.8)
+            Text(t("文字上下偏移")).font(.callout.weight(.medium)).frame(width:112,alignment:.leading).lineLimit(2).minimumScaleFactor(0.8)
             Slider(value:Binding(get:{ value },set:{ set($0) }),in:range,step:0.25)
                 .controlSize(.small).accessibilityLabel(t("文字上下偏移"))
                 .overlay(alignment:.center) {
@@ -539,7 +572,14 @@ struct TrafficPanel: View {
     }
     private func promptName(title: String, initial: String, confirm: String) -> String? {
         let alert = NSAlert(); alert.messageText = title
-        let field = NSTextField(frame:NSRect(x:0,y:0,width:240,height:24)); field.stringValue = initial
+        let field = NSTextField(frame:NSRect(x:0,y:0,width:280,height:24))
+        field.stringValue = initial
+        field.placeholderString = t("配置名称")
+        field.isBezeled = true
+        field.bezelStyle = .squareBezel
+        field.usesSingleLineMode = true
+        field.font = NSFont.systemFont(ofSize:13)
+        (field.cell as? NSTextFieldCell)?.isScrollable = true
         alert.accessoryView = field
         alert.addButton(withTitle:confirm); alert.addButton(withTitle:t("取消"))
         alert.window.initialFirstResponder = field
@@ -644,5 +684,31 @@ struct TrafficPanel: View {
             Spacer()
             EsaiFooterGhostButton(title:t("退出"),systemImage:"power",role:.destructive,help:t("退出 ESAI Impulse")) { NSApp.terminate(nil) }
         }.padding(.horizontal,16).padding(.vertical,8)
+    }
+}
+
+
+private struct EsaiFocusField<Content: View>: View {
+    var accent: Color
+    var text: Binding<String>? = nil
+    var clearable = false
+    var height: CGFloat = 34
+    @ViewBuilder var content: () -> Content
+    @FocusState private var focused: Bool
+    var body: some View {
+        HStack(spacing:6) {
+            content().textFieldStyle(.plain).focused($focused)
+            if clearable, let text, !text.wrappedValue.isEmpty {
+                Button { text.wrappedValue = "" } label: {
+                    Image(systemName:"xmark.circle.fill").font(.system(size:11)).foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Clear")
+            }
+        }
+        .padding(.leading,12).padding(.trailing,clearable ? 8 : 12)
+        .frame(height:height)
+        .background(EsaiSurface.sunken,in:Capsule())
+        .overlay(Capsule().strokeBorder(focused ? accent : EsaiSurface.hairline.opacity(0.4),lineWidth:focused ? 1.5 : 0.5))
     }
 }

@@ -8,6 +8,7 @@ struct UsageBarChart: View {
     var compact = false
     var language: AppLanguage = .chinese
     @State private var hoveredID: String? = nil
+    @State private var chipWidth: CGFloat = 120
     var body: some View {
         let finite = days.compactMap(\.usedBytes)
         let yMax = UsageChartLayout.yMaxBytes(finite.max() ?? 0)
@@ -53,14 +54,18 @@ struct UsageBarChart: View {
                     Spacer(minLength:0)
                 }
                 if let hoveredID, let idx = days.firstIndex(where:{ $0.id == hoveredID }) {
-                    let xCenter = plotOriginX + CGFloat(idx)*(width+gap) + width/2
+                    let rawX = plotOriginX + CGFloat(idx)*(width+gap) + width/2
+                    let x = CGFloat(UsageChartLayout.clampCenter(Double(rawX), half:Double(chipWidth/2), total:Double(proxy.size.width)))
                     Color.clear.frame(width:0,height:0)
-                        .overlay(hoverChip(days[idx]))
-                        .offset(x:xCenter, y: compact ? 1 : 2)
+                        .overlay(hoverChip(days[idx]).background(GeometryReader { g in
+                            Color.clear.preference(key:ChipWidthKey.self,value:g.size.width)
+                        }))
+                        .offset(x:x, y: compact ? 1 : 2)
                         .allowsHitTesting(false)
                         .zIndex(1)
                 }
             }
+            .onPreferenceChange(ChipWidthKey.self) { if $0 > 0 { chipWidth = $0 } }
         }
     }
     @ViewBuilder private func cap(_ day: UsageDay, maxBytes: Double, width: CGFloat, height: CGFloat, highlighted: Bool) -> some View {
@@ -122,9 +127,7 @@ struct UsageMetricCard: View {
         }
         .padding(12).frame(maxWidth:.infinity,alignment:.leading)
         .esaiCard(warn || emphasis ? .sunken : .raised)
-        .background {
-            if warn { RoundedRectangle(cornerRadius:EsaiSurface.radiusCard,style:.continuous).fill(Color(red:0.96,green:0.90,blue:0.83).opacity(0.65)) }
-        }
+        .background { WarnCardFill(warn:warn) }
     }
 }
 
@@ -183,5 +186,22 @@ struct UsagePanelSummary: View {
     private func runoutHelp(date: Date) -> String {
         let text = UsageMath.formatSGTDate(date,language:model.resolvedLanguage)
         return model.translate("约 %@（新加坡日期）",arguments:[text])
+    }
+}
+
+private struct ChipWidthKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value,nextValue()) }
+}
+
+private struct WarnCardFill: View {
+    var warn: Bool
+    @Environment(\.colorScheme) private var scheme
+    var body: some View {
+        if warn {
+            RoundedRectangle(cornerRadius:EsaiSurface.radiusCard,style:.continuous)
+                .fill(scheme == .dark ? Color(red:0.42,green:0.26,blue:0.08).opacity(0.72)
+                                      : Color(red:0.96,green:0.90,blue:0.83).opacity(0.65))
+        }
     }
 }
