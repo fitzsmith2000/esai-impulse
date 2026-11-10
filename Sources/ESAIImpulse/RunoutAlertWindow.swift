@@ -66,8 +66,8 @@ struct RunoutAlertView: View {
         if let instant = instant {
             date = UsageMath.formatSGTDate(instant,language:model.resolvedLanguage)
         }
-        if date.isEmpty { return t("剩余 %@，近 7 日日均 %@。请确认你已看到这条提醒。",left,avg) }
-        return t("剩余 %@，近 7 日日均 %@。预计用尽日为 %@（新加坡日期）。请确认你已看到这条提醒。",left,avg,date)
+        if date.isEmpty { return t("剩余 %@，近 7 日典型用量 %@。请确认你已看到这条提醒。",left,avg) }
+        return t("剩余 %@，近 7 日典型用量 %@。预计用尽日为 %@（新加坡日期）。请确认你已看到这条提醒。",left,avg,date)
     }
 }
 

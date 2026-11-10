@@ -227,6 +227,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNU
             let folder = CommandLine.arguments.count > i+1 ? CommandLine.arguments[i+1] : "/tmp/esai-impulse-usage"
             MainActor.assumeIsolated { UsageRender.run(to:folder, dark:CommandLine.arguments.contains("--dark")) }; return
         }
+        if let i = CommandLine.arguments.firstIndex(of:"--preview-qa-windows") {
+            let folder = CommandLine.arguments.count > i+1 && !CommandLine.arguments[i+1].hasPrefix("-") ? CommandLine.arguments[i+1] : nil
+            MainActor.assumeIsolated { QAWindows.run(outputFolder:folder) }; return
+        }
         if let i = CommandLine.arguments.firstIndex(of:"--render-qa") {
             let folder = CommandLine.arguments.count > i+1 ? CommandLine.arguments[i+1] : "/tmp/esai-impulse-qa"
             MainActor.assumeIsolated { QARender.run(to:folder) }; return

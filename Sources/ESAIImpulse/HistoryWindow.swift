@@ -60,17 +60,30 @@ struct HistoryView: View {
                                 value:summary.average7.map { formatTraffic(gb:TrafficStats.gb($0)) } ?? t("暂无"),
                                 subtitle:t("不含今日与不完整日"))
                             let predicted = predictedText(summary)
-                            UsageMetricCard(title:t("预计用尽"),value:predicted.value,subtitle:predicted.sub,warn:summary.predictedWholeDays.map { $0 <= model.runoutWarnDays } ?? false)
+                            UsageMetricCard(title:t("预计用尽"),value:predicted.value,subtitle:predicted.sub,warn:(summary.isOfficial ? summary.predictedWholeDays.map { $0 <= model.runoutWarnDays } : nil) ?? false)
+                        }
+                        if summary.showWeekdayWeekendSplit {
+                            let weekday = summary.weekdayRateBytes.map { formatTraffic(gb:TrafficStats.gb($0)) } ?? t("暂无")
+                            let weekend = summary.weekendMedianBytes.map { formatTraffic(gb:TrafficStats.gb($0)) } ?? t("暂无")
+                            VStack(alignment:.leading,spacing:2) {
+                                Text(t("工作日日均 %@ · 周末 %@",weekday,weekend))
+                                    .font(.caption).foregroundStyle(.secondary)
+                                if summary.showWeekendLaterHint {
+                                    Text(t("若周末接近近期中位数（多为接近 0），用完会更晚"))
+                                        .font(.caption).foregroundStyle(.tertiary)
+                                }
+                            }
                         }
                     }
                     dayList.frame(width:260)
                 }
                 .frame(maxWidth:.infinity,maxHeight:.infinity)
-                Text(t("若一天的开始和结束都有记录，当天用量按累计已用的差值计算，中间休眠不影响。若关闭应用或电脑休眠跨越了新加坡时间 10:00 的日界线，中间用量会计入醒来后的那一天，并标成「数据不完整」，不算进日均。"))
+                .clipped()
+                Text(t("若一天的开始和结束都有记录，当天用量按累计已用的差值计算，中间休眠不影响。若关闭应用或电脑休眠跨越了新加坡时间 10:00 的日界线，中间用量会计入醒来后的那一天，并标成「数据不完整」，不算进日均。流量耗尽日不计入日均与预测。"))
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
             }.padding(16)
         }
-        .frame(minWidth:800,minHeight:560,alignment:.topLeading)
+        .frame(minWidth:800,minHeight:640,alignment:.topLeading)
         .background(EsaiSurface.panel)
         .tint(accent)
         .preferredColorScheme(model.colorScheme)
@@ -102,6 +115,8 @@ struct HistoryView: View {
                                 tag(day))
                     }
                 }
+                .frame(maxWidth:.infinity,maxHeight:.infinity,alignment:.top)
+                .clipped()
             } else {
                 ScrollView(.vertical) {
                     VStack(spacing:0) {
@@ -133,20 +148,31 @@ struct HistoryView: View {
     private func tag(_ day: UsageDay) -> String? {
         if day.isToday { return t("今日") }
         if day.isMissing { return t("无数据") }
+        if day.isQuotaExhausted { return t("流量耗尽") }
         if day.isIncomplete { return t("不完整") }
         return nil
     }
     private func tagColor(_ tag: String) -> Color {
         if tag == t("今日") { return accent }
         if tag == t("不完整") { return Color(red:0.56,green:0.48,blue:0.29) }
+        if tag == t("流量耗尽") { return Color(red:0.52,green:0.46,blue:0.42) }
         return .secondary
     }
     private func predictedText(_ summary: UsageSummary) -> (value: String, sub: String) {
+        if let needed = summary.insufficientNeeded {
+            return (t("暂无"), t("数据不足，还需 %@ 个完整日",String(needed)))
+        }
         guard let whole = summary.predictedWholeDays, let date = summary.predictedRunoutDate else {
             return (t("暂无"), t("完整日不足，暂无法预测"))
         }
         let text = UsageMath.formatSGTDate(date,language:model.resolvedLanguage)
-        return (t("约 %@ 天",String(whole)), t("约 %@（新加坡日期）",text))
+        var sub = summary.isPreliminary
+            ? t("初步估计 · 约 %@（新加坡日期）",text)
+            : t("约 %@（新加坡日期）",text)
+        if let high = summary.highPredictedWholeDays {
+            sub += "\n" + t("按近期偏高用量，约 %@ 天",String(high))
+        }
+        return (t("约 %@ 天",String(whole)), sub)
     }
     private func exportCSV() {
         let panel = NSSavePanel()
@@ -162,13 +188,13 @@ struct HistoryView: View {
 final class HistoryWindowController: NSWindowController, NSWindowDelegate {
     convenience init(model: TrafficModel) {
         let host = NSHostingController(rootView:HistoryView(model:model))
-        let window = NSWindow(contentRect:NSRect(x:0,y:0,width:860,height:640),
+        let window = NSWindow(contentRect:NSRect(x:0,y:0,width:860,height:720),
                               styleMask:[.titled,.closable,.miniaturizable,.resizable],
                               backing:.buffered,defer:false)
         window.title = model.translate("用量历史")
         window.contentViewController = host
-        window.setContentSize(NSSize(width:860,height:640))
-        window.minSize = NSSize(width:800,height:560)
+        window.setContentSize(NSSize(width:860,height:720))
+        window.minSize = NSSize(width:800,height:640)
         window.isReleasedWhenClosed = false
         window.center()
         self.init(window:window)
@@ -184,6 +210,15 @@ final class HistoryWindowController: NSWindowController, NSWindowDelegate {
 
 /// Offscreen renders of the panel summary, history window, and run-out alert. No Keychain or network.
 @MainActor enum UsageRender {
+
+    static func warningPreviewInfo(summary: UsageSummary, now: Date = UsageSample.sampleNow) -> RunoutAlertInfo {
+        let rate = summary.typicalRateBytes ?? summary.average7 ?? 20e9
+        let remaining = rate * 8.4
+        let f = UsageMath.forecast(remainingBytes:remaining, averageBytes:rate, now:now)!
+        return RunoutAlertInfo(days:f.wholeDays, remainingBytes:remaining, averageBytes:rate,
+            todayUsedBytes:summary.todayUsedBytes, runoutDate:f.date)
+    }
+
     static func run(to folder: String, dark: Bool) {
         let app = NSApplication.shared; app.setActivationPolicy(.prohibited)
         let suite = "com.fitzsmith2000.esai-impulse.usage-render"
@@ -218,14 +253,11 @@ final class HistoryWindowController: NSWindowController, NSWindowDelegate {
         write(dark ? "panel-dark.png" : "panel.png", panel)
 
         let history = HistoryView(model:model)
-            .frame(width:860,height:640,alignment:.topLeading)
+            .frame(width:860,height:720,alignment:.topLeading)
         write(dark ? "history-dark.png" : "history.png", history)
 
         let summary = model.usageSummary(now:UsageSample.sampleNow)
-        let info = RunoutAlertInfo(days:summary.predictedWholeDays ?? 8,
-            remainingBytes:UsageSample.sampleStats.left,
-            averageBytes:summary.average7, todayUsedBytes:summary.todayUsedBytes,
-            runoutDate:summary.predictedRunoutDate)
+        let info = UsageRender.warningPreviewInfo(summary:summary)
         let alert = RunoutAlertView(model:model, info:info, onConfirm:{}).padding(4)
         write(dark ? "alert-dark.png" : "alert.png", alert)
         d.removePersistentDomain(forName:suite)
@@ -289,13 +321,10 @@ final class HistoryWindowController: NSWindowController, NSWindowDelegate {
         case .panel:
             view = AnyView(TrafficPanel(model:model).frame(width:model.panelSize.width,height:model.panelSize.height))
         case .history:
-            view = AnyView(HistoryView(model:model).frame(width:860,height:640,alignment:.topLeading))
+            view = AnyView(HistoryView(model:model).frame(width:860,height:720,alignment:.topLeading))
         case .alert:
             let summary = model.usageSummary(now:UsageSample.sampleNow)
-            let info = RunoutAlertInfo(days:summary.predictedWholeDays ?? 8,
-                remainingBytes:UsageSample.sampleStats.left,
-                averageBytes:summary.average7, todayUsedBytes:summary.todayUsedBytes,
-                runoutDate:summary.predictedRunoutDate)
+            let info = UsageRender.warningPreviewInfo(summary:summary)
             view = AnyView(RunoutAlertView(model:model, info:info, onConfirm:{}).padding(4))
         }
         let r = ImageRenderer(content:view.background(bg).environment(\.colorScheme,scheme))
@@ -336,5 +365,114 @@ final class HistoryWindowController: NSWindowController, NSWindowDelegate {
         try! png.write(to:URL(fileURLWithPath:"\(folder)/\(name)"))
         d.removePersistentDomain(forName:suite)
         print("RENDERED \(name)")
+    }
+}
+
+
+/// Live sample-data windows for QA screenshots. Prefers an off-screen origin; also writes
+/// window-only PNGs from the window's theme frame (works without Screen Recording permission).
+@MainActor enum QAWindows {
+    private static var retained: [Any] = []
+    static func run(outputFolder: String? = nil) {
+        let app = NSApplication.shared
+        app.setActivationPolicy(.prohibited)
+        EsaiRenderMode.offscreen = false
+        let suite = "com.fitzsmith2000.esai-impulse.qa-windows"
+        let d = UserDefaults(suiteName:suite)!
+        d.removePersistentDomain(forName:suite)
+        d.set("zh-Hans", forKey:"language")
+        d.set(200.0, forKey:"thresholdGB")
+        d.set(10, forKey:"runoutWarnDays")
+        d.set("light", forKey:"appearance")
+        if let data = try? JSONEncoder().encode(UsageSample.sampleStats) { d.set(data, forKey:"lastStats") }
+        d.set(UsageSample.sampleNow, forKey:"lastRefresh")
+        let model = TrafficModel(defaults:d, preview:true, usage:UsageSample.store())
+        model.nowOverride = UsageSample.sampleNow
+        model.prepareForUsageRender()
+        model.panelSize = PopoverLayout.preferredSize
+
+        func decorate(_ window: NSWindow, title: String, origin: NSPoint) {
+            window.title = title
+            window.isReleasedWhenClosed = false
+            window.isRestorable = false
+            window.level = .floating
+            window.collectionBehavior = [.canJoinAllSpaces, .ignoresCycle, .fullScreenNone, .transient]
+            window.animationBehavior = .none
+            window.alphaValue = 0
+            window.setFrameOrigin(origin)
+            window.orderFrontRegardless()
+            window.setFrameOrigin(origin)
+            print("QA_WINDOW \(title) id=\(window.windowNumber) frame=\(NSStringFromRect(window.frame))")
+        }
+
+        let panelHost = NSHostingController(rootView:TrafficPanel(model:model)
+            .frame(width:model.panelSize.width,height:model.panelSize.height))
+        let panelWin = NSWindow(contentViewController:panelHost)
+        panelWin.styleMask = [.titled,.closable]
+        panelWin.setContentSize(model.panelSize)
+        retained.append(panelWin)
+        decorate(panelWin, title:"ESAI Impulse QA Panel", origin:NSPoint(x:-4000,y:400))
+
+        let history = HistoryWindowController(model:model)
+        retained.append(history)
+        if let win = history.window {
+            decorate(win, title:"ESAI Impulse QA History", origin:NSPoint(x:-3200,y:200))
+        }
+
+        let info = UsageRender.warningPreviewInfo(summary:model.usageSummary(now:UsageSample.sampleNow))
+        let alertHost = NSHostingController(rootView:RunoutAlertView(model:model, info:info, onConfirm:{}))
+        let alertWin = NSWindow(contentViewController:alertHost)
+        alertWin.styleMask = [.titled,.closable]
+        alertWin.setContentSize(alertHost.view.fittingSize)
+        retained.append(alertWin)
+        decorate(alertWin, title:"ESAI Impulse QA Alert", origin:NSPoint(x:-3600,y:80))
+
+        print("QA_WINDOWS_READY")
+        if let folder = outputFolder, !folder.isEmpty {
+            try? FileManager.default.createDirectory(atPath:folder,withIntermediateDirectories:true)
+            // Let SwiftUI finish the first layout pass before capturing.
+            DispatchQueue.main.async {
+                for win in [panelWin, history.window, alertWin].compactMap({ $0 }) {
+                    win.alphaValue = 1
+                    win.displayIfNeeded()
+                }
+                snapshot(panelWin, to:"\(folder)/panel-window.png")
+                if let win = history.window { snapshot(win, to:"\(folder)/history-window.png") }
+                snapshot(alertWin, to:"\(folder)/alert-window.png")
+                for win in [panelWin, history.window, alertWin].compactMap({ $0 }) {
+                    win.alphaValue = 0
+                    win.orderOut(nil)
+                }
+                print("QA_WINDOWS_SNAPSHOTTED")
+                app.stop(nil)
+            }
+            app.run()
+        } else {
+            app.run()
+        }
+        d.removePersistentDomain(forName:suite)
+    }
+
+    private static func snapshot(_ window: NSWindow, to path: String) {
+        window.layoutIfNeeded()
+        window.contentView?.layoutSubtreeIfNeeded()
+        // Theme-frame view includes the title bar, equivalent to a window-only capture.
+        let view = window.contentView?.superview ?? window.contentView
+        guard let view = view else { print("SNAPSHOT_FAIL \(path) no view"); return }
+        let rect = view.bounds
+        guard rect.width > 1, rect.height > 1,
+              let rep = view.bitmapImageRepForCachingDisplay(in:rect) else {
+            print("SNAPSHOT_FAIL \(path) no bitmap"); return
+        }
+        view.cacheDisplay(in:rect, to:rep)
+        guard let data = rep.representation(using:.png, properties:[:]) else {
+            print("SNAPSHOT_FAIL \(path) png"); return
+        }
+        do {
+            try data.write(to:URL(fileURLWithPath:path))
+            print("WROTE \(path) \(data.count)")
+        } catch {
+            print("SNAPSHOT_FAIL \(path) \(error)")
+        }
     }
 }

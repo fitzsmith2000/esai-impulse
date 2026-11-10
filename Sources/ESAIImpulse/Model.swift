@@ -287,7 +287,8 @@ final class TrafficModel: ObservableObject {
     func usageCSV(now: Date? = nil) -> String {
         let clock = now ?? self.now()
         let days = usageDays(now:clock)
-        return usage.csv(days:days,language:resolvedLanguage,forecast:usageSummary(now:clock).forecast)
+        let summary = usageSummary(now:clock)
+        return usage.csv(days:days,language:resolvedLanguage,forecast:summary.forecast,summary:summary)
     }
     func openHistory() { openHistoryHandler?() }
     /// Preview-only: pretend an account is saved so offscreen renders show the dashboard.
@@ -309,8 +310,9 @@ final class TrafficModel: ObservableObject {
         let now = self.now()
         let summary = usageSummary(now:now)
         let remaining = stats?.left ?? usage.alerts.lastShownRemainingBytes ?? 0
+        let formalDays = summary.isOfficial ? summary.predictedWholeDays : nil
         let action = RunoutPolicy.action(
-            predictedWholeDays:summary.predictedWholeDays, remainingBytes:remaining,
+            predictedWholeDays:formalDays, remainingBytes:remaining,
             threshold:runoutWarnDays, unconfirmed:usage.alerts.unconfirmed,
             acknowledgedDays:usage.alerts.acknowledgedDays)
         switch action {
@@ -319,10 +321,10 @@ final class TrafficModel: ObservableObject {
                 $0.unconfirmed = true
                 $0.lastShownDays = days
                 $0.lastShownRemainingBytes = remaining
-                $0.lastShownAverageBytes = summary.average7
+                $0.lastShownAverageBytes = summary.typicalRateBytes
             }
             runoutPresentation = RunoutAlertInfo(days:days,remainingBytes:remaining,
-                averageBytes:summary.average7,todayUsedBytes:summary.todayUsedBytes,
+                averageBytes:summary.typicalRateBytes,todayUsedBytes:summary.todayUsedBytes,
                 runoutDate:summary.predictedRunoutDate)
         case .dismiss:
             usage.updateAlerts {

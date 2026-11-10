@@ -289,7 +289,7 @@ struct TrafficPanel: View {
                         Button("\(v)") { runoutDraft = String(v); applyRunoutDays() }.font(.caption).esaiGlassButton(prominent:model.runoutWarnDays == v)
                     }
                 }
-                Text(t("按近 7 日日均预测还能用多少天。剩余天数首次降到该值或以下时弹出桌面窗口，需点确认才会关闭；之后在 7、3、1 天再提醒。流量回升到该值以上后重新待命。"))
+                Text(t("按近 7 个可用完整日的典型用量预测还能用多少天。至少 7 个可用日后显示正式预测；3–6 个可用日在面板里标为「初步估计」，此阶段不弹出桌面窗口。剩余天数首次降到该值或以下时弹出桌面窗口，需点确认才会关闭；之后在 7、3、1 天再提醒。流量回升到该值以上后重新待命。"))
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
                     .padding(12).frame(maxWidth:.infinity,alignment:.leading).esaiCard(.sunken)
             }

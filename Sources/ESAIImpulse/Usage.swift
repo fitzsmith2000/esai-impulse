@@ -50,6 +50,8 @@ func usageGapThreshold(intervalMinutes: Int) -> TimeInterval {
 
 /// A used drop larger than this starts a new plan epoch (resets / new plan). Smaller dips are clamped to 0.
 let usageResetEpsilon: Double = 1_000_000
+/// Remaining at or below this is treated as quota exhausted (~10 MB).
+let usageQuotaExhaustedEpsilon: Double = 10_000_000
 
 // MARK: - Records
 
@@ -85,11 +87,25 @@ struct UsageDay: Equatable {
     var usedBytes: Double? = nil
     var isToday = false
     var isIncomplete = false
+    var isQuotaExhausted = false
     var snapshotCount = 0
     var firstTs: Date? = nil
     var lastTs: Date? = nil
+    var endingLeftBytes: Double? = nil
     var isMissing: Bool { usedBytes == nil }
     var isComplete: Bool { usedBytes != nil && !isToday && !isIncomplete }
+    /// Complete and not quota-exhausted. Used for averages and the run-out forecast.
+    var isUsable: Bool { isComplete && !isQuotaExhausted }
+}
+
+/// How ready the run-out forecast is, based on the number of usable complete days.
+enum ForecastStage: Equatable {
+    /// Fewer than 3 usable days; `needed` more complete days are required.
+    case insufficient(needed: Int)
+    /// 3–6 usable days: show a forecast marked as a preliminary estimate; do not pop the desktop alert.
+    case preliminary
+    /// 7 or more usable days: formal forecast; the ≤10-day desktop alert may appear.
+    case official
 }
 
 struct UsageSummary: Equatable {
@@ -102,11 +118,33 @@ struct UsageSummary: Equatable {
     var average30: Double? = nil
     var completeDays30 = 0
     var considered30 = 0
-    /// remaining ÷ 7-day average, in days; nil if it cannot be predicted.
+    /// Usable complete days in the whole series (excluding today).
+    var usableDaysTotal = 0
+    /// Usable days in the last-7 window used for the typical rate.
+    var usableDaysWindow = 0
+    /// Trimmed mean of the last 7 usable days; this is the typical daily rate for the forecast.
+    var typicalRateBytes: Double? = nil
+    /// 80th percentile of the same window, or the second-highest value if fewer than 5 usable days.
+    var highRateBytes: Double? = nil
+    var forecastStage: ForecastStage = .insufficient(needed: 3)
+    /// remaining ÷ typical rate, in days; nil if the forecast is hidden.
     var predictedDays: Double? = nil
     var predictedWholeDays: Int? = nil
     /// `now + predictedDays` (fractional), for display as a Singapore calendar date.
     var predictedRunoutDate: Date? = nil
+    var highPredictedDays: Double? = nil
+    var highPredictedWholeDays: Int? = nil
+    var highPredictedRunoutDate: Date? = nil
+    var weekdayRateBytes: Double? = nil
+    var weekendMedianBytes: Double? = nil
+    var showWeekdayWeekendSplit = false
+    var showWeekendLaterHint = false
+    var isPreliminary: Bool { forecastStage == .preliminary }
+    var isOfficial: Bool { forecastStage == .official }
+    var insufficientNeeded: Int? {
+        if case .insufficient(let n) = forecastStage { return n }
+        return nil
+    }
     var forecast: RunoutForecast? {
         guard let days = predictedDays, let whole = predictedWholeDays, let date = predictedRunoutDate else { return nil }
         return RunoutForecast(fractionalDays:days, wholeDays:whole, date:date)
@@ -154,6 +192,7 @@ enum UsageMath {
             days[i].snapshotCount += 1
             if days[i].firstTs == nil { days[i].firstTs = shot.ts }
             days[i].lastTs = shot.ts
+            days[i].endingLeftBytes = shot.left
 
             if offset == 0 { continue }
             let prev = ordered[offset-1]
@@ -189,17 +228,96 @@ enum UsageMath {
                 days[i].isIncomplete = true
             }
         }
+        for i in days.indices {
+            if days[i].isToday { continue }
+            if let left = days[i].endingLeftBytes, left <= usageQuotaExhaustedEpsilon {
+                days[i].isQuotaExhausted = true
+            }
+        }
         return days
     }
+
+    static let formalForecastUsableDays = 7
+    static let preliminaryForecastUsableDays = 3
+    static let weekdayWeekendSplitUsableDays = 14
+    static let weekdayRateWindow = 10
+    static let weekendMedianWindow = 8
+    static let weekendHintRatio = 0.5
+    static let weekendHintMinGapBytes: Double = 1_000_000_000
 
     static func average(of days: [UsageDay], last n: Int, excludingToday: Bool = true) -> (average: Double?, complete: Int, considered: Int) {
         let pool = excludingToday ? days.filter { !$0.isToday } : days
         let window = Array(pool.suffix(n))
-        let complete = window.filter(\.isComplete)
+        let usable = window.filter(\.isUsable)
         let considered = window.count
-        guard !complete.isEmpty else { return (nil,0,considered) }
-        let total = complete.compactMap(\.usedBytes).reduce(0,+)
-        return (total/Double(complete.count), complete.count, considered)
+        guard !usable.isEmpty else { return (nil,0,considered) }
+        let total = usable.compactMap(\.usedBytes).reduce(0,+)
+        return (total/Double(usable.count), usable.count, considered)
+    }
+
+    /// Trimmed mean of daily usage: 3 values drop the highest; 4 or more drop the highest and the lowest.
+    static func trimmedMean(_ values: [Double]) -> Double? {
+        guard !values.isEmpty else { return nil }
+        let xs = values.sorted()
+        let kept: ArraySlice<Double>
+        switch xs.count {
+        case 1, 2: kept = xs[...]
+        case 3: kept = xs.dropLast()
+        default: kept = xs.dropFirst().dropLast()
+        }
+        return kept.reduce(0,+)/Double(kept.count)
+    }
+
+    /// 80th percentile of the window; if fewer than 5 values, the second-highest (or the only value).
+    static func highScenarioRate(_ values: [Double]) -> Double? {
+        guard !values.isEmpty else { return nil }
+        let xs = values.sorted()
+        if xs.count < 5 {
+            return xs.count >= 2 ? xs[xs.count-2] : xs[0]
+        }
+        let pos = 0.80 * Double(xs.count - 1)
+        let lo = Int(pos.rounded(.down))
+        let hi = min(xs.count-1, Int(pos.rounded(.up)))
+        if lo == hi { return xs[lo] }
+        let w = pos - Double(lo)
+        return xs[lo]*(1-w) + xs[hi]*w
+    }
+
+    /// Weekend of a usage-day id is the SGT calendar weekday at noon of that date (Sat/Sun).
+    static func isWeekend(_ id: String, calendar cal: Calendar = UsageCalendar.calendar()) -> Bool {
+        let parts = id.split(separator:"-").compactMap { Int($0) }
+        guard parts.count == 3,
+              let date = cal.date(from:DateComponents(year:parts[0],month:parts[1],day:parts[2],hour:12))
+        else { return false }
+        let w = cal.component(.weekday, from:date)
+        return w == 1 || w == 7
+    }
+
+    static func lastUsable(_ days: [UsageDay], limit: Int) -> [UsageDay] {
+        Array(days.filter { $0.isUsable }.suffix(limit))
+    }
+
+    static func weekdayRate(days: [UsageDay]) -> Double? {
+        trimmedMean(lastUsable(days.filter { !isWeekend($0.id) }, limit:weekdayRateWindow).compactMap(\.usedBytes))
+    }
+
+    static func weekendMedian(days: [UsageDay]) -> Double? {
+        let vals = lastUsable(days.filter { isWeekend($0.id) }, limit:weekendMedianWindow).compactMap(\.usedBytes)
+        guard !vals.isEmpty else { return nil }
+        let xs = vals.sorted()
+        let mid = xs.count / 2
+        if xs.count % 2 == 1 { return xs[mid] }
+        return (xs[mid-1] + xs[mid]) / 2
+    }
+
+    static func shouldShowWeekendLaterHint(weekdayRate: Double, weekendMedian: Double) -> Bool {
+        weekdayRate > 0 && weekendMedian < weekdayRate * weekendHintRatio && (weekdayRate - weekendMedian) >= weekendHintMinGapBytes
+    }
+
+    static func forecastStage(usableCount: Int) -> ForecastStage {
+        if usableCount >= formalForecastUsableDays { return .official }
+        if usableCount >= preliminaryForecastUsableDays { return .preliminary }
+        return .insufficient(needed: max(0, preliminaryForecastUsableDays - usableCount))
     }
 
     static func summarize(days: [UsageDay], remainingBytes: Double?, now: Date,
@@ -213,11 +331,35 @@ enum UsageMath {
             secondsLeftInDay:UsageCalendar.secondsLeft(inDayOf:now,now:now,calendar:cal),
             average7:a7.average, completeDays7:a7.complete,
             average30:a30.average, completeDays30:a30.complete, considered30:a30.considered)
-        if let left = remainingBytes, left > 0, let avg = a7.average, avg > 0, a7.complete >= 1 {
-            let f = forecast(predictedDays:left/avg, now:now)
+        let usableAll = days.filter(\.isUsable)
+        summary.usableDaysTotal = usableAll.count
+        let window = Array(usableAll.suffix(formalForecastUsableDays))
+        summary.usableDaysWindow = window.count
+        let windowValues = window.compactMap(\.usedBytes)
+        summary.typicalRateBytes = trimmedMean(windowValues)
+        summary.highRateBytes = highScenarioRate(windowValues)
+        summary.forecastStage = forecastStage(usableCount:usableAll.count)
+        if summary.insufficientNeeded == nil, let left = remainingBytes, left > 0,
+           let rate = summary.typicalRateBytes, rate > 0 {
+            let f = forecast(predictedDays:left/rate, now:now)
             summary.predictedDays = f.fractionalDays
             summary.predictedWholeDays = f.wholeDays
             summary.predictedRunoutDate = f.date
+        }
+        if summary.insufficientNeeded == nil, let left = remainingBytes, left > 0,
+           let rate = summary.highRateBytes, rate > 0 {
+            let f = forecast(predictedDays:left/rate, now:now)
+            summary.highPredictedDays = f.fractionalDays
+            summary.highPredictedWholeDays = f.wholeDays
+            summary.highPredictedRunoutDate = f.date
+        }
+        if usableAll.count >= weekdayWeekendSplitUsableDays {
+            summary.weekdayRateBytes = weekdayRate(days:days)
+            summary.weekendMedianBytes = weekendMedian(days:days)
+            summary.showWeekdayWeekendSplit = summary.weekdayRateBytes != nil || summary.weekendMedianBytes != nil
+            if let weekday = summary.weekdayRateBytes, let weekend = summary.weekendMedianBytes {
+                summary.showWeekendLaterHint = shouldShowWeekendLaterHint(weekdayRate:weekday, weekendMedian:weekend)
+            }
         }
         return summary
     }
@@ -248,6 +390,7 @@ enum UsageMath {
         let usage = day.usedBytes.map { formatTraffic(gb:TrafficStats.gb($0)) } ?? "—"
         var parts = [date, usage]
         if day.isToday { parts.append(L10n.text("今日",language:language)) }
+        else if day.isQuotaExhausted { parts.append(L10n.text("流量耗尽",language:language)) }
         else if day.isIncomplete { parts.append(L10n.text("不完整",language:language)) }
         else if day.isMissing { parts.append(L10n.text("无数据",language:language)) }
         return parts.joined(separator:" · ")
@@ -405,7 +548,7 @@ final class UsageStore {
         save()
     }
 
-    func csv(days: [UsageDay], language: AppLanguage = .english, forecast: RunoutForecast? = nil) -> String {
+    func csv(days: [UsageDay], language: AppLanguage = .english, forecast: RunoutForecast? = nil, summary: UsageSummary? = nil) -> String {
         var lines = ["date,usage_gb,status,snapshot_count,first_ts,last_ts"]
         let iso = ISO8601DateFormatter()
         func stamp(_ d: Date?) -> String { d.map { iso.string(from:$0) } ?? "" }
@@ -413,14 +556,26 @@ final class UsageStore {
             let status: String
             if day.isToday { status = "today" }
             else if day.isMissing { status = "missing" }
+            else if day.isQuotaExhausted { status = "exhausted" }
             else if day.isIncomplete { status = "incomplete" }
             else { status = "complete" }
             let usage = day.usedBytes.map { String(format:"%.3f",TrafficStats.gb($0)) } ?? ""
             lines.append("\(day.id),\(usage),\(status),\(day.snapshotCount),\(stamp(day.firstTs)),\(stamp(day.lastTs))")
         }
-        if let f = forecast {
+        if let s = summary {
+            switch s.forecastStage {
+            case .official: lines.append("# predicted_stage,official")
+            case .preliminary: lines.append("# predicted_stage,preliminary")
+            case .insufficient(let n): lines.append("# predicted_stage,insufficient,needed,\(n)")
+            }
+        }
+        if let f = forecast ?? summary?.forecast {
             lines.append("# predicted_whole_days,\(f.wholeDays)")
             lines.append("# predicted_runout_date_sgt,\(UsageMath.formatSGTISODate(f.date))")
+        }
+        if let high = summary?.highPredictedWholeDays, let date = summary?.highPredictedRunoutDate {
+            lines.append("# high_predicted_whole_days,\(high)")
+            lines.append("# high_predicted_runout_date_sgt,\(UsageMath.formatSGTISODate(date))")
         }
         return lines.joined(separator:"\n") + "\n"
     }
@@ -462,31 +617,37 @@ enum UsageSample {
         // (still in the Nov 9 usage day, which ends 10:00 SGT Nov 10). 03:36 SGT = 11:36 PST Nov 9.
         // The mockup used "距今日结束还有 11 小时 24 分" → 10:00 - 11h24m = 22:36 SGT Nov 9,
         // which is still Nov 9 usage day (starts 10:00 SGT Nov 9). 22:36 SGT = 06:36 PST Nov 9.
-        let values: [(String,Double,Bool)] = [
-            ("2026-10-27",133.8,false),("2026-10-28",116.5,false),("2026-10-29",121.0,false),
-            ("2026-10-30",144.7,false),("2026-10-31",89.2,false),("2026-11-01",131.4,false),
-            ("2026-11-02",125.6,false),("2026-11-03",109.8,false),("2026-11-04",152.1,false),
-            ("2026-11-05",98.4,false),("2026-11-06",141.0,true),("2026-11-07",118.5,false),
-            ("2026-11-08",136.2,false),("2026-11-09",42.6,false)
+        // Extra early days so the sample has ≥14 usable days (weekday/weekend split + weekend tip).
+        // Weekends are low; 10-26 is quota-exhausted (visible tag); 11-06 stays incomplete
+        // via a late first snapshot, with a close-of-day bound so 11-07 remains complete.
+        let values: [(id:String,gb:Double,incomplete:Bool,exhausted:Bool)] = [
+            ("2026-10-23",128.4,false,false),("2026-10-24",2.1,false,false),("2026-10-25",0.4,false,false),
+            ("2026-10-26",8.4,false,true),
+            ("2026-10-27",133.8,false,false),("2026-10-28",116.5,false,false),("2026-10-29",121.0,false,false),
+            ("2026-10-30",144.7,false,false),("2026-10-31",3.2,false,false),("2026-11-01",1.1,false,false),
+            ("2026-11-02",125.6,false,false),("2026-11-03",109.8,false,false),("2026-11-04",152.1,false,false),
+            ("2026-11-05",98.4,false,false),("2026-11-06",141.0,true,false),("2026-11-07",0.8,false,false),
+            ("2026-11-08",2.4,false,false),("2026-11-09",42.6,false,false)
         ]
         var used: Double = 4_200_000_000_000
         let total: Double = 5_661_800_000_000
-        for (id, gb, incomplete) in values {
+        for (id, gb, incomplete, exhausted) in values {
             let start = UsageCalendar.interval(forDay:id).start
-            _ = s.record(used:used,total:total,left:total-used,at:start)
             if incomplete {
-                used += (gb*1e9)/2
-                _ = s.record(used:used,total:total,left:total-used,at:start.addingTimeInterval(2*3600))
-                used += (gb*1e9)/2
-                _ = s.record(used:used,total:total,left:total-used,at:start.addingTimeInterval(6*3600))
-                // No end-of-day snapshot: the day is incomplete (legend "米色为不完整").
+                // First snapshot > 3h after start → incomplete, but close to the day end so the next day stays complete.
+                _ = s.record(used:used,total:total,left:total-used,at:start.addingTimeInterval(5*3600))
+                used += gb*1e9
+                _ = s.record(used:used,total:total,left:total-used,at:start.addingTimeInterval(23*3600))
             } else if id == "2026-11-09" {
+                _ = s.record(used:used,total:total,left:total-used,at:start)
                 used += gb*1e9
                 _ = s.record(used:used,total:total,left:total-used,at:sampleNow)
             } else {
+                _ = s.record(used:used,total:total,left:total-used,at:start)
                 used += gb*1e9
                 let endish = start.addingTimeInterval(23*3600)
-                _ = s.record(used:used,total:total,left:total-used,at:endish)
+                let left = exhausted ? 0.0 : total-used
+                _ = s.record(used:used,total:total,left:left,at:endish)
             }
         }
         return s
@@ -586,9 +747,9 @@ enum UsageTests {
             startUsed += gb*1e9
             if incomplete {
                 // Stop early so this finished day has no closing bound and is incomplete.
-                _ = avgStore.record(used:startUsed,total:1000e9,left:0,at:start.addingTimeInterval(4*3600))
+                _ = avgStore.record(used:startUsed,total:1000e9,left:1000e9-startUsed,at:start.addingTimeInterval(4*3600))
             } else {
-                _ = avgStore.record(used:startUsed,total:1000e9,left:0,at:start.addingTimeInterval(23*3600))
+                _ = avgStore.record(used:startUsed,total:1000e9,left:1000e9-startUsed,at:start.addingTimeInterval(23*3600))
             }
         }
         var u = 0.0
@@ -596,25 +757,30 @@ enum UsageTests {
         fill("2026-11-06",gb:20,startUsed:&u)
         fill("2026-11-07",gb:30,startUsed:&u)
         fill("2026-11-08",gb:40,startUsed:&u,incomplete:true)
-        _ = avgStore.record(used:u,total:1000e9,left:0,at:sgt(2026,11,9,10))
+        _ = avgStore.record(used:u,total:1000e9,left:1000e9-u,at:sgt(2026,11,9,10))
         u += 5e9
-        _ = avgStore.record(used:u,total:1000e9,left:0,at:sgt(2026,11,9,12))
+        _ = avgStore.record(used:u,total:1000e9,left:1000e9-u,at:sgt(2026,11,9,12))
         let aDays = avgStore.days(now:sgt(2026,11,9,12,30))
         let a7 = UsageMath.average(of:aDays,last:7)
         // complete days in window: Nov 5,6,7 (Nov 8 incomplete, Nov 9 today excluded)
         precondition(a7.complete == 3)
         precondition(abs((a7.average ?? 0) - 20e9) < 1)
 
-        // Prediction: remaining / 7-day avg, floored; nil when no complete days, avg 0, or remaining <= 0.
+        // Prediction: 3 usable days → preliminary; typical rate is trimmed mean of 10/20/30 = 15 GB.
+        // 50 / 15 ≈ 3.333 → floor 3. The desktop alert must not fire in the preliminary stage.
         let rem = 50e9
         var summary = UsageMath.summarize(days:aDays,remainingBytes:rem,now:sgt(2026,11,9,12,30))
-        // 50 / 20 = 2.5 → floor 2
-        precondition(abs((summary.predictedDays ?? 0) - 2.5) < 0.01)
-        precondition(summary.predictedWholeDays == 2)
+        precondition(summary.forecastStage == .preliminary)
+        precondition(abs((summary.typicalRateBytes ?? 0) - 15e9) < 1)
+        precondition(abs((summary.predictedDays ?? 0) - (50e9/15e9)) < 0.01)
+        precondition(summary.predictedWholeDays == 3)
+        let prelimDays = summary.isOfficial ? summary.predictedWholeDays : nil
+        precondition(RunoutPolicy.action(predictedWholeDays:prelimDays,remainingBytes:rem,threshold:10,unconfirmed:false,acknowledgedDays:nil) == .stayHidden)
         summary = UsageMath.summarize(days:aDays,remainingBytes:0,now:sgt(2026,11,9,12,30))
         precondition(summary.predictedDays == nil)
         let emptySummary = UsageMath.summarize(days:[UsageDay(id:"2026-11-09",isToday:true)],remainingBytes:100e9,now:sgt(2026,11,9,12))
         precondition(emptySummary.predictedDays == nil)
+        precondition(emptySummary.forecastStage == .insufficient(needed:3))
 
         // Run-out re-alert rules.
         let T = 10
@@ -671,16 +837,18 @@ enum UsageTests {
         precondition(UsageMath.formatSGTDate(pred.date,language:.chinese) != UsageMath.formatSGTDate(floorDate,language:.chinese))
         // summarize() and a remaining/avg rebuild match the same function (panel, history, alert, CSV).
         let predNow2 = sgt(2026,11,9,12,30)
-        let fromParts = UsageMath.forecast(remainingBytes:rem, averageBytes:a7.average!, now:predNow2)!
+        let fromParts = UsageMath.forecast(remainingBytes:rem, averageBytes:15e9, now:predNow2)!
         let consistent = UsageMath.summarize(days:aDays,remainingBytes:rem,now:predNow2)
         precondition(consistent.predictedWholeDays == fromParts.wholeDays)
         precondition(consistent.predictedRunoutDate == fromParts.date)
         precondition(consistent.forecast?.date == fromParts.date)
-        precondition(consistent.predictedWholeDays == 2)
+        precondition(consistent.predictedWholeDays == 3)
+        precondition(consistent.forecastStage == .preliminary)
         precondition(UsageMath.formatSGTISODate(fromParts.date) == "2026-11-12")
-        let csvForecast = gapped.csv(days:gDays, forecast:consistent.forecast)
-        precondition(csvForecast.contains("# predicted_whole_days,2"))
+        let csvForecast = gapped.csv(days:gDays, forecast:consistent.forecast, summary:consistent)
+        precondition(csvForecast.contains("# predicted_whole_days,3"))
         precondition(csvForecast.contains("# predicted_runout_date_sgt,2026-11-12"))
+        precondition(csvForecast.contains("# predicted_stage,preliminary"))
         // 1–2 day charts stay width-capped; y-max is padded above the tallest bar.
         precondition(UsageChartLayout.barWidth(dayCount:1,available:400,compact:false) == UsageChartLayout.historyBarMax)
         precondition(UsageChartLayout.barWidth(dayCount:2,available:400,compact:false) == UsageChartLayout.historyBarMax)
@@ -699,16 +867,147 @@ enum UsageTests {
         precondition(UsageMath.barHoverLabel(day:missing,language:.chinese) == "11月8日 · — · 无数据")
         let complete = UsageDay(id:"2026-11-07", usedBytes:98.4e9, isToday:false)
         precondition(UsageMath.barHoverLabel(day:complete,language:.chinese) == "11月7日 · 98.4 GB")
+        let exhaustedBar = UsageDay(id:"2026-10-26", usedBytes:8.4e9, isToday:false, isQuotaExhausted:true)
+        precondition(UsageMath.barHoverLabel(day:exhaustedBar,language:.chinese) == "10月26日 · 8.4 GB · 流量耗尽")
+        precondition(UsageMath.barHoverLabel(day:exhaustedBar,language:.english) == "Oct 26 · 8.4 GB · Quota exhausted")
         precondition(UsageMath.formatDayID("2026-11-09",language:.chinese) == "11月9日")
         precondition(UsageMath.formatDayID("2026-11-09",language:.english) == "Nov 9")
         precondition(abs(UsageChartLayout.clampCenter(0,half:40,total:200) - 44) < 0.01)
         precondition(abs(UsageChartLayout.clampCenter(200,half:40,total:200) - 156) < 0.01)
         precondition(abs(UsageChartLayout.clampCenter(100,half:40,total:200) - 100) < 0.01)
         // English map covers keys shown on every usage surface, including short card titles.
-        for key in ["剩余","今日已用","今日","不完整","无数据","用量历史","导出 CSV","配置名称","还没有用量记录"] {
+        for key in ["剩余","今日已用","今日","不完整","无数据","流量耗尽","用量历史","导出 CSV","配置名称","还没有用量记录","初步估计","数据不足，还需 %@ 个完整日","按近期偏高用量，约 %@ 天","按近期偏高用量，约 %@ 天（%@）","工作日日均 %@ · 周末 %@","若周末接近近期中位数（多为接近 0），用完会更晚","初步估计 · 约 %@（新加坡日期）"] {
             precondition(L10n.english[key] != nil, "missing English for \(key)")
         }
-        let nov6 = UsageSample.store().days(now:UsageSample.sampleNow).first { $0.id == "2026-11-06" }
+        let sampleDays = UsageSample.store().days(now:UsageSample.sampleNow)
+        let nov6 = sampleDays.first { $0.id == "2026-11-06" }
         precondition(nov6?.isIncomplete == true)
+        let nov7 = sampleDays.first { $0.id == "2026-11-07" }
+        precondition(nov7?.isComplete == true)
+        let oct26 = sampleDays.first { $0.id == "2026-10-26" }
+        precondition(oct26?.isQuotaExhausted == true)
+        precondition(oct26?.isUsable == false)
+        let sampleSummary = UsageMath.summarize(days:sampleDays,remainingBytes:UsageSample.sampleStats.left,now:UsageSample.sampleNow)
+        precondition(sampleSummary.usableDaysTotal >= 14)
+        precondition(sampleSummary.forecastStage == .official)
+        precondition(sampleSummary.showWeekdayWeekendSplit)
+        precondition(sampleSummary.showWeekendLaterHint)
+
+        Self.runForecastV2Tests()
+    }
+
+    /// Build consecutive complete days ending on `lastID`; `now` is 12:30 SGT of the next usage day.
+    static func seedUsableDays(daily: [Double], lastID: String, startUsed: Double = 1e12, total: Double = 10e12, exhaustedIndex: Int? = nil) -> (store: UsageStore, days: [UsageDay], now: Date) {
+        let store = UsageStore.memory()
+        let lastStart = UsageCalendar.interval(forDay:lastID).start
+        var ids: [String] = []
+        for i in 0..<daily.count {
+            let start = lastStart.addingTimeInterval(Double(i-(daily.count-1))*24*3600)
+            ids.append(UsageCalendar.dayID(for:start.addingTimeInterval(3600)))
+        }
+        var used = startUsed
+        for (i, id) in ids.enumerated() {
+            let start = UsageCalendar.interval(forDay:id).start
+            _ = store.record(used:used,total:total,left:total-used,at:start)
+            used += daily[i]
+            let left = (i == exhaustedIndex) ? 0.0 : total-used
+            _ = store.record(used:used,total:total,left:left,at:start.addingTimeInterval(23*3600))
+        }
+        let todayStart = lastStart.addingTimeInterval(24*3600)
+        let now = todayStart.addingTimeInterval(2.5*3600)
+        _ = store.record(used:used,total:total,left:total-used,at:todayStart)
+        return (store, store.days(now:now), now)
+    }
+
+    static func runForecastV2Tests() {
+        // Date formula stays: floor days, date = now + fractional days.
+        let formula = UsageMath.forecast(remainingBytes:50e9, averageBytes:20e9, now:sgt(2026,11,9,12,30))!
+        precondition(abs(formula.fractionalDays - 2.5) < 0.01)
+        precondition(formula.wholeDays == 2)
+        precondition(UsageMath.formatSGTISODate(formula.date) == "2026-11-12")
+
+        // Trimmed mean: 3 values drop the highest; ≥4 drop highest and lowest.
+        precondition(abs((UsageMath.trimmedMean([10,20,30]) ?? 0) - 15) < 0.001)
+        precondition(abs((UsageMath.trimmedMean([10,20,30,40]) ?? 0) - 25) < 0.001)
+        precondition(abs((UsageMath.trimmedMean([40,40,40,40,40,40,400]) ?? 0) - 40) < 0.001)
+
+        // 80th percentile (linear, n≥5); n<5 uses the second-highest.
+        precondition(abs((UsageMath.highScenarioRate([10]) ?? 0) - 10) < 0.001)
+        precondition(abs((UsageMath.highScenarioRate([10,20,30,40]) ?? 0) - 30) < 0.001)
+        // n=5, pos=0.8*4=3.2 → 0.8*xs[3]+0.2*xs[4] = 0.8*40+0.2*50 = 42
+        precondition(abs((UsageMath.highScenarioRate([10,20,30,40,50]) ?? 0) - 42) < 0.001)
+
+        // Thresholds: <3 hide; 3–6 preliminary; ≥7 official.
+        let two = seedUsableDays(daily:[10e9,20e9], lastID:"2026-11-08")
+        let twoS = UsageMath.summarize(days:two.days,remainingBytes:50e9,now:two.now)
+        precondition(twoS.forecastStage == .insufficient(needed:1))
+        precondition(twoS.predictedDays == nil)
+        let three = seedUsableDays(daily:[10e9,20e9,30e9], lastID:"2026-11-08")
+        let threeS = UsageMath.summarize(days:three.days,remainingBytes:50e9,now:three.now)
+        precondition(threeS.forecastStage == .preliminary)
+        precondition(threeS.predictedWholeDays != nil)
+        let six = seedUsableDays(daily:Array(repeating:20e9,count:6), lastID:"2026-11-08")
+        precondition(UsageMath.summarize(days:six.days,remainingBytes:50e9,now:six.now).forecastStage == .preliminary)
+        let seven = seedUsableDays(daily:Array(repeating:20e9,count:7), lastID:"2026-11-08")
+        let sevenS = UsageMath.summarize(days:seven.days,remainingBytes:160e9,now:seven.now)
+        precondition(sevenS.forecastStage == .official)
+        precondition(abs((sevenS.typicalRateBytes ?? 0) - 20e9) < 1)
+        precondition(sevenS.predictedWholeDays == 8)
+        precondition(RunoutPolicy.action(predictedWholeDays:sevenS.isOfficial ? sevenS.predictedWholeDays : nil,remainingBytes:160e9,threshold:10,unconfirmed:false,acknowledgedDays:nil) == .show(days:8))
+
+        // Spike: six 40 GB days + one 400 GB day; trimmed typical is 40, not 91.
+        let spike = seedUsableDays(daily:[40e9,40e9,40e9,40e9,40e9,40e9,400e9], lastID:"2026-11-08")
+        let spikeS = UsageMath.summarize(days:spike.days,remainingBytes:200e9,now:spike.now)
+        precondition(abs((spikeS.typicalRateBytes ?? 0) - 40e9) < 1)
+        precondition(abs((spikeS.average7 ?? 0) - ((40e9*6+400e9)/7)) < 1)
+
+        // Level shift: seven 20 GB then seven 80 GB; last-7 typical is 80.
+        let step = seedUsableDays(daily:Array(repeating:20e9,count:7)+Array(repeating:80e9,count:7), lastID:"2026-11-08")
+        let stepS = UsageMath.summarize(days:step.days,remainingBytes:400e9,now:step.now)
+        precondition(abs((stepS.typicalRateBytes ?? 0) - 80e9) < 1)
+
+        // Exhausted days are flagged and excluded from the rate window.
+        let exh = seedUsableDays(daily:[20e9,0,20e9,20e9,20e9], lastID:"2026-11-08", exhaustedIndex:1)
+        let exhDays = exh.days.filter { !$0.isToday }
+        let exhMarked = exhDays.first { $0.usedBytes == 0 || abs(($0.usedBytes ?? -1)) < 1 }
+        precondition(exhMarked?.isQuotaExhausted == true)
+        precondition(exhMarked?.isUsable == false)
+        let exhS = UsageMath.summarize(days:exh.days,remainingBytes:60e9,now:exh.now)
+        // 4 usable days of 20 GB (0-usage exhausted day dropped); 4-day trim drops min+max → 20.
+        precondition(exhS.usableDaysTotal == 4)
+        precondition(abs((exhS.typicalRateBytes ?? 0) - 20e9) < 1)
+        let csvExh = exh.store.csv(days:exh.days)
+        precondition(csvExh.contains(",exhausted,"))
+
+        // A zero-usage day that still has remaining quota is not exhausted.
+        let quiet = UsageStore.memory()
+        let qStart = UsageCalendar.interval(forDay:"2026-11-08").start
+        _ = quiet.record(used:1e12,total:10e12,left:9e12,at:qStart)
+        _ = quiet.record(used:1e12,total:10e12,left:9e12,at:qStart.addingTimeInterval(23*3600))
+        let qDay = quiet.days(now:qStart.addingTimeInterval(26*3600)).first { $0.id == "2026-11-08" }
+        precondition(qDay?.usedBytes == 0 || abs((qDay?.usedBytes ?? 1)) < 1)
+        precondition(qDay?.isQuotaExhausted == false)
+        precondition(qDay?.isUsable == true)
+
+        // Weekend tip only when the weekend median is clearly below the weekday rate.
+        precondition(UsageMath.shouldShowWeekendLaterHint(weekdayRate:20e9, weekendMedian:0.2e9))
+        precondition(UsageMath.shouldShowWeekendLaterHint(weekdayRate:20e9, weekendMedian:15e9) == false)
+        precondition(UsageMath.shouldShowWeekendLaterHint(weekdayRate:0.5e9, weekendMedian:0) == false)
+        // 2026-10-10 (Sat) through 2026-11-08 (Sun): 30 days with low weekends.
+        let hint = seedUsableDays(
+            daily:(0..<30).map { i in
+                let start = UsageCalendar.interval(forDay:"2026-10-10").start.addingTimeInterval(Double(i)*24*3600)
+                let id = UsageCalendar.dayID(for:start.addingTimeInterval(3600))
+                return UsageMath.isWeekend(id) ? 0.2e9 : 20e9
+            },
+            lastID:"2026-11-08")
+        let hintS = UsageMath.summarize(days:hint.days,remainingBytes:200e9,now:hint.now)
+        precondition(hintS.usableDaysTotal >= 14)
+        precondition(hintS.showWeekdayWeekendSplit)
+        precondition(hintS.showWeekendLaterHint)
+        let noTip = seedUsableDays(daily:Array(repeating:20e9,count:21), lastID:"2026-11-08")
+        let noTipS = UsageMath.summarize(days:noTip.days,remainingBytes:200e9,now:noTip.now)
+        precondition(noTipS.showWeekdayWeekendSplit)
+        precondition(noTipS.showWeekendLaterHint == false)
     }
 }

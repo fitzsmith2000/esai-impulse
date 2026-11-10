@@ -2,7 +2,7 @@ import Foundation
 import CoreGraphics
 
 enum PopoverLayout {
-    static let preferredSize = CGSize(width:400,height:540)
+    static let preferredSize = CGSize(width:400,height:640)
     static let screenMargin: CGFloat = 8
     static let chromeAllowance: CGFloat = 28
 

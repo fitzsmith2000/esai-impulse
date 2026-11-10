@@ -76,6 +76,8 @@ struct UsageBarChart: View {
         Group {
             if day.isToday {
                 shape.fill(stripes).frame(width:width,height:h)
+            } else if day.isQuotaExhausted {
+                shape.fill(Color(red:0.58,green:0.54,blue:0.52)).frame(width:width,height:h)
             } else if day.isIncomplete {
                 shape.fill(Color(red:0.77,green:0.71,blue:0.54)).frame(width:width,height:h)
             } else if day.isMissing {
@@ -161,18 +163,57 @@ struct UsagePanelSummary: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer(minLength:8)
-                if let whole = summary.predictedWholeDays, let date = summary.predictedRunoutDate {
-                    Text(t("预计约 %@ 天后用尽",String(whole)))
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(Color(red:0.78,green:0.42,blue:0.03))
-                        .help(runoutHelp(date:date))
-                }
+                forecastCaption(summary)
             }
             HStack(spacing:8) {
                 metric(t("7 日日均"), summary.average7.map { formatTraffic(gb:TrafficStats.gb($0)) } ?? t("暂无"),
                        summary.completeDays7 == 0 ? t("仅计完整日，不含今日") : t("%@ 个完整日",String(summary.completeDays7)))
                 metric(t("30 日日均"), summary.average30.map { formatTraffic(gb:TrafficStats.gb($0)) } ?? t("暂无"),
                        summary.completeDays30 == 0 ? t("仅计完整日，不含今日") : t("%@ / %@ 个完整日",String(summary.completeDays30),String(summary.considered30)))
+            }
+            secondaryForecastLines(summary)
+        }
+    }
+    @ViewBuilder private func forecastCaption(_ summary: UsageSummary) -> some View {
+        if let needed = summary.insufficientNeeded {
+            Text(t("数据不足，还需 %@ 个完整日",String(needed)))
+                .font(.caption).foregroundStyle(.secondary)
+        } else if let whole = summary.predictedWholeDays, let date = summary.predictedRunoutDate {
+            HStack(spacing:4) {
+                Text(t("预计约 %@ 天后用尽",String(whole)))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color(red:0.78,green:0.42,blue:0.03))
+                if summary.isPreliminary {
+                    Text(t("初步估计"))
+                        .font(.system(size:10,weight:.semibold))
+                        .foregroundStyle(Color(red:0.78,green:0.42,blue:0.03))
+                        .padding(.horizontal,5).padding(.vertical,1)
+                        .background(Color(red:0.78,green:0.42,blue:0.03).opacity(0.14),in:Capsule())
+                }
+            }
+            .help(runoutHelp(date:date))
+        }
+    }
+    @ViewBuilder private func secondaryForecastLines(_ summary: UsageSummary) -> some View {
+        if summary.insufficientNeeded != nil { EmptyView() }
+        else {
+            VStack(alignment:.leading,spacing:3) {
+                if let highWhole = summary.highPredictedWholeDays, let highDate = summary.highPredictedRunoutDate {
+                    Text(t("按近期偏高用量，约 %@ 天（%@）",String(highWhole),UsageMath.formatSGTDate(highDate,language:model.resolvedLanguage)))
+                        .font(.system(size:11)).foregroundStyle(.secondary)
+                        .fixedSize(horizontal:false,vertical:true)
+                }
+                if summary.showWeekdayWeekendSplit {
+                    let weekday = summary.weekdayRateBytes.map { formatTraffic(gb:TrafficStats.gb($0)) } ?? t("暂无")
+                    let weekend = summary.weekendMedianBytes.map { formatTraffic(gb:TrafficStats.gb($0)) } ?? t("暂无")
+                    Text(t("工作日日均 %@ · 周末 %@",weekday,weekend))
+                        .font(.system(size:11)).foregroundStyle(.secondary)
+                    if summary.showWeekendLaterHint {
+                        Text(t("若周末接近近期中位数（多为接近 0），用完会更晚"))
+                            .font(.system(size:11)).foregroundStyle(.tertiary)
+                            .fixedSize(horizontal:false,vertical:true)
+                    }
+                }
             }
         }
     }
