@@ -5,7 +5,7 @@ import UniformTypeIdentifiers
 struct HistoryView: View {
     @ObservedObject var model: TrafficModel
     @State private var range = UsageRange.thirty
-    var now: Date = Date()
+    private var now: Date { model.now() }
     private var accent: Color { model.accentColor }
     private func t(_ key: String, _ arguments: String...) -> String { model.translate(key,arguments:arguments) }
     private var days: [UsageDay] {
@@ -44,7 +44,7 @@ struct HistoryView: View {
                                 Text(t("完整日均 %@ · 米色为不完整",summary.average30.map { formatTraffic(gb:TrafficStats.gb($0)) } ?? t("暂无")))
                                     .font(.caption).foregroundStyle(.secondary)
                             }
-                            UsageBarChart(days:days,accent:accent).frame(minHeight:220,maxHeight:280)
+                            UsageBarChart(days:days,accent:accent,language:model.resolvedLanguage).frame(minHeight:220,maxHeight:280)
                         }.padding(14).esaiCard(.sunken)
                         HStack(spacing:8) {
                             UsageMetricCard(title:t("今日已用"),
@@ -114,11 +114,11 @@ struct HistoryView: View {
         return .secondary
     }
     private func predictedText(_ summary: UsageSummary) -> (value: String, sub: String) {
-        guard let whole = summary.predictedWholeDays, let frac = summary.predictedDays else {
+        guard let whole = summary.predictedWholeDays, let date = summary.predictedRunoutDate else {
             return (t("暂无"), t("完整日不足，暂无法预测"))
         }
-        let date = UsageMath.formatSGTDate(UsageMath.predictedRunoutDate(predictedDays:frac,now:now),language:model.resolvedLanguage)
-        return (t("约 %@ 天",String(whole)), t("约 %@（新加坡日期）",date))
+        let text = UsageMath.formatSGTDate(date,language:model.resolvedLanguage)
+        return (t("约 %@ 天",String(whole)), t("约 %@（新加坡日期）",text))
     }
     private func exportCSV() {
         let panel = NSSavePanel()
@@ -189,14 +189,15 @@ final class HistoryWindowController: NSWindowController, NSWindowDelegate {
             .frame(width:model.panelSize.width,height:model.panelSize.height)
         write(dark ? "panel-dark.png" : "panel.png", panel)
 
-        let history = HistoryView(model:model, now:UsageSample.sampleNow)
+        let history = HistoryView(model:model)
             .frame(width:820,height:580)
         write(dark ? "history-dark.png" : "history.png", history)
 
         let summary = model.usageSummary(now:UsageSample.sampleNow)
         let info = RunoutAlertInfo(days:summary.predictedWholeDays ?? 8,
             remainingBytes:UsageSample.sampleStats.left,
-            averageBytes:summary.average7, todayUsedBytes:summary.todayUsedBytes)
+            averageBytes:summary.average7, todayUsedBytes:summary.todayUsedBytes,
+            runoutDate:summary.predictedRunoutDate)
         let alert = RunoutAlertView(model:model, info:info, onConfirm:{}).padding(4)
         write(dark ? "alert-dark.png" : "alert.png", alert)
         d.removePersistentDomain(forName:suite)

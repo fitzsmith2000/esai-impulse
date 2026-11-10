@@ -108,8 +108,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNU
     @objc private func menuRefresh() { model.refresh() }
     @objc private func menuHistory() { openHistory() }
     private func openHistory() {
+        if popover.isShown { popover.performClose(nil) }
         if historyWindow == nil { historyWindow = HistoryWindowController(model:model) }
-        historyWindow?.show()
+        DispatchQueue.main.async { [weak self] in
+            self?.historyWindow?.show()
+        }
     }
     @objc private func menuSettings() {
         model.navigation.settingsTab = "account"; model.navigation.showingSettings = true

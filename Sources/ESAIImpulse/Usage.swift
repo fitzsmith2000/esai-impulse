@@ -105,6 +105,19 @@ struct UsageSummary: Equatable {
     /// remaining ÷ 7-day average, in days; nil if it cannot be predicted.
     var predictedDays: Double? = nil
     var predictedWholeDays: Int? = nil
+    /// `now + predictedDays` (fractional), for display as a Singapore calendar date.
+    var predictedRunoutDate: Date? = nil
+    var forecast: RunoutForecast? {
+        guard let days = predictedDays, let whole = predictedWholeDays, let date = predictedRunoutDate else { return nil }
+        return RunoutForecast(fractionalDays:days, wholeDays:whole, date:date)
+    }
+}
+
+/// Shared run-out forecast: day count is floor(fractional days); date is now + fractional days.
+struct RunoutForecast: Equatable {
+    var fractionalDays: Double
+    var wholeDays: Int
+    var date: Date
 }
 
 enum UsageRange: String, CaseIterable { case seven = "7", thirty = "30", all = "all" }
@@ -201,15 +214,52 @@ enum UsageMath {
             average7:a7.average, completeDays7:a7.complete,
             average30:a30.average, completeDays30:a30.complete, considered30:a30.considered)
         if let left = remainingBytes, left > 0, let avg = a7.average, avg > 0, a7.complete >= 1 {
-            let daysLeft = left/avg
-            summary.predictedDays = daysLeft
-            summary.predictedWholeDays = Int(daysLeft.rounded(.down))
+            let f = forecast(predictedDays:left/avg, now:now)
+            summary.predictedDays = f.fractionalDays
+            summary.predictedWholeDays = f.wholeDays
+            summary.predictedRunoutDate = f.date
         }
         return summary
     }
 
+    /// Day count = floor(fractional days); date = now + fractional days (display as SGT calendar date).
+    static func forecast(predictedDays: Double, now: Date) -> RunoutForecast {
+        RunoutForecast(fractionalDays:predictedDays,
+                       wholeDays:Int(predictedDays.rounded(.down)),
+                       date:now.addingTimeInterval(predictedDays*24*3600))
+    }
+    static func forecast(remainingBytes: Double, averageBytes: Double, now: Date) -> RunoutForecast? {
+        guard remainingBytes > 0, averageBytes > 0 else { return nil }
+        return forecast(predictedDays:remainingBytes/averageBytes, now:now)
+    }
     static func predictedRunoutDate(predictedDays: Double, now: Date) -> Date {
-        now.addingTimeInterval(predictedDays*24*3600)
+        forecast(predictedDays:predictedDays, now:now).date
+    }
+    /// Singapore calendar date of a usage-day id (`yyyy-MM-dd`), e.g. 11月9日 / Nov 9.
+    static func formatDayID(_ id: String, language: AppLanguage) -> String {
+        let parts = id.split(separator:"-").compactMap { Int($0) }
+        guard parts.count == 3,
+              let date = UsageCalendar.calendar().date(from:DateComponents(year:parts[0],month:parts[1],day:parts[2],hour:12)) else { return id }
+        return formatSGTDate(date,language:language)
+    }
+    /// Hover label: "11月9日 · 42.6 GB", plus 今日 / 不完整 / 无数据 when applicable.
+    static func barHoverLabel(day: UsageDay, language: AppLanguage) -> String {
+        let date = formatDayID(day.id,language:language)
+        let usage = day.usedBytes.map { formatTraffic(gb:TrafficStats.gb($0)) } ?? "—"
+        var parts = [date, usage]
+        if day.isToday { parts.append(L10n.text("今日",language:language)) }
+        else if day.isIncomplete { parts.append(L10n.text("不完整",language:language)) }
+        else if day.isMissing { parts.append(L10n.text("无数据",language:language)) }
+        return parts.joined(separator:" · ")
+    }
+    /// Singapore calendar date `yyyy-MM-dd` of an instant (not the 10:00 usage-day id).
+    static func formatSGTISODate(_ date: Date) -> String {
+        let f = DateFormatter()
+        f.calendar = UsageCalendar.calendar()
+        f.timeZone = UsageCalendar.timeZone
+        f.locale = Locale(identifier:"en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd"
+        return f.string(from:date)
     }
 
     static func formatSGTDate(_ date: Date, language: AppLanguage) -> String {
@@ -225,6 +275,36 @@ enum UsageMath {
         let total = max(0, Int(interval.rounded()))
         let h = total/3600, m = (total%3600)/60
         return language == .english ? "\(h) h \(m) min" : "\(h) 小时 \(m) 分"
+    }
+}
+
+/// Bar-chart layout: cap width for 1–2 days and use a padded nice y-max so a single day is not a full-height needle.
+enum UsageChartLayout {
+    static let historyBarMax = 36.0
+    static let compactBarMax = 16.0
+    static let historyBarMin = 6.0
+    static let compactBarMin = 4.0
+    static func gap(compact: Bool) -> Double { compact ? 4 : 6 }
+    static func barWidth(dayCount: Int, available: Double, compact: Bool) -> Double {
+        let n = max(1, dayCount)
+        let g = gap(compact:compact)
+        let raw = (available - g*Double(n-1))/Double(n)
+        let cap = compact ? compactBarMax : historyBarMax
+        let floor = compact ? compactBarMin : historyBarMin
+        return min(cap, max(floor, raw))
+    }
+    static func yMaxBytes(_ maxBytes: Double) -> Double {
+        let gb = max(TrafficStats.gb(max(0,maxBytes)), 1)
+        return niceGB(gb*1.15)*1e9
+    }
+    static func niceGB(_ gb: Double) -> Double {
+        guard gb > 0 else { return 1 }
+        let exp = floor(log10(gb))
+        let pow10 = pow(10.0, exp)
+        let mantissa = gb/pow10
+        let steps = [1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0]
+        let nice = steps.first(where:{ $0+1e-9 >= mantissa }) ?? 10
+        return nice*pow10
     }
 }
 
@@ -318,7 +398,7 @@ final class UsageStore {
         save()
     }
 
-    func csv(days: [UsageDay], language: AppLanguage = .english) -> String {
+    func csv(days: [UsageDay], language: AppLanguage = .english, forecast: RunoutForecast? = nil) -> String {
         var lines = ["date,usage_gb,status,snapshot_count,first_ts,last_ts"]
         let iso = ISO8601DateFormatter()
         func stamp(_ d: Date?) -> String { d.map { iso.string(from:$0) } ?? "" }
@@ -330,6 +410,10 @@ final class UsageStore {
             else { status = "complete" }
             let usage = day.usedBytes.map { String(format:"%.3f",TrafficStats.gb($0)) } ?? ""
             lines.append("\(day.id),\(usage),\(status),\(day.snapshotCount),\(stamp(day.firstTs)),\(stamp(day.lastTs))")
+        }
+        if let f = forecast {
+            lines.append("# predicted_whole_days,\(f.wholeDays)")
+            lines.append("# predicted_runout_date_sgt,\(UsageMath.formatSGTISODate(f.date))")
         }
         return lines.joined(separator:"\n") + "\n"
     }
@@ -568,5 +652,47 @@ enum UsageTests {
         precondition(csv.hasPrefix("date,usage_gb,status,"))
         precondition(csv.contains("2026-11-09,,missing,"))
         precondition(csv.contains("2026-11-10,") && csv.contains(",incomplete,"))
+
+        // Forecast display is shared: day count = floor, date = now + fractional days (SGT calendar date).
+        let predNow = sgt(2026,11,9,22,36)
+        let pred = UsageMath.forecast(predictedDays:8.815, now:predNow)
+        precondition(pred.wholeDays == 8)
+        precondition(abs(pred.date.timeIntervalSince(predNow) - 8.815*24*3600) < 0.01)
+        precondition(UsageMath.formatSGTDate(pred.date,language:.chinese) == "11月18日")
+        precondition(UsageMath.formatSGTISODate(pred.date) == "2026-11-18")
+        // Using floor days for the date would land on a different SGT calendar day — must not do that.
+        let floorDate = predNow.addingTimeInterval(8*24*3600)
+        precondition(UsageMath.formatSGTDate(floorDate,language:.chinese) == "11月17日")
+        precondition(UsageMath.formatSGTDate(pred.date,language:.chinese) != UsageMath.formatSGTDate(floorDate,language:.chinese))
+        // summarize() and a remaining/avg rebuild match the same function (panel, history, alert, CSV).
+        let predNow2 = sgt(2026,11,9,12,30)
+        let fromParts = UsageMath.forecast(remainingBytes:rem, averageBytes:a7.average!, now:predNow2)!
+        let consistent = UsageMath.summarize(days:aDays,remainingBytes:rem,now:predNow2)
+        precondition(consistent.predictedWholeDays == fromParts.wholeDays)
+        precondition(consistent.predictedRunoutDate == fromParts.date)
+        precondition(consistent.forecast?.date == fromParts.date)
+        precondition(consistent.predictedWholeDays == 2)
+        precondition(UsageMath.formatSGTISODate(fromParts.date) == "2026-11-12")
+        let csvForecast = gapped.csv(days:gDays, forecast:consistent.forecast)
+        precondition(csvForecast.contains("# predicted_whole_days,2"))
+        precondition(csvForecast.contains("# predicted_runout_date_sgt,2026-11-12"))
+        // 1–2 day charts stay width-capped; y-max is padded above the tallest bar.
+        precondition(UsageChartLayout.barWidth(dayCount:1,available:400,compact:false) == UsageChartLayout.historyBarMax)
+        precondition(UsageChartLayout.barWidth(dayCount:2,available:400,compact:false) == UsageChartLayout.historyBarMax)
+        precondition(UsageChartLayout.barWidth(dayCount:30,available:400,compact:false) < UsageChartLayout.historyBarMax)
+        precondition(UsageChartLayout.yMaxBytes(42.6e9) > 42.6e9)
+        precondition(UsageChartLayout.yMaxBytes(0) >= 1e9)
+
+        // Hover labels share the same date + usage wording on the panel and the history chart.
+        var todayBar = UsageDay(id:"2026-11-09", usedBytes:42.6e9, isToday:true)
+        precondition(UsageMath.barHoverLabel(day:todayBar,language:.chinese) == "11月9日 · 42.6 GB · 今日")
+        precondition(UsageMath.barHoverLabel(day:todayBar,language:.english) == "Nov 9 · 42.6 GB · Today")
+        todayBar.isToday = false
+        todayBar.isIncomplete = true
+        precondition(UsageMath.barHoverLabel(day:todayBar,language:.chinese) == "11月9日 · 42.6 GB · 不完整")
+        let missing = UsageDay(id:"2026-11-08", isToday:false)
+        precondition(UsageMath.barHoverLabel(day:missing,language:.chinese) == "11月8日 · — · 无数据")
+        let complete = UsageDay(id:"2026-11-07", usedBytes:98.4e9, isToday:false)
+        precondition(UsageMath.barHoverLabel(day:complete,language:.chinese) == "11月7日 · 98.4 GB")
     }
 }

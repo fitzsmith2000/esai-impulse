@@ -284,7 +284,11 @@ final class TrafficModel: ObservableObject {
     func usageSummary(now: Date? = nil) -> UsageSummary {
         usage.summary(remainingBytes:stats?.left,now:now ?? self.now())
     }
-    func usageCSV(now: Date? = nil) -> String { usage.csv(days:usageDays(now:now ?? self.now()),language:resolvedLanguage) }
+    func usageCSV(now: Date? = nil) -> String {
+        let clock = now ?? self.now()
+        let days = usageDays(now:clock)
+        return usage.csv(days:days,language:resolvedLanguage,forecast:usageSummary(now:clock).forecast)
+    }
     func openHistory() { openHistoryHandler?() }
     /// Preview-only: pretend an account is saved so offscreen renders show the dashboard.
     func prepareForUsageRender() { hasCredentials = true }
@@ -318,7 +322,8 @@ final class TrafficModel: ObservableObject {
                 $0.lastShownAverageBytes = summary.average7
             }
             runoutPresentation = RunoutAlertInfo(days:days,remainingBytes:remaining,
-                averageBytes:summary.average7,todayUsedBytes:summary.todayUsedBytes)
+                averageBytes:summary.average7,todayUsedBytes:summary.todayUsedBytes,
+                runoutDate:summary.predictedRunoutDate)
         case .dismiss:
             usage.updateAlerts {
                 $0.unconfirmed = false
@@ -331,10 +336,13 @@ final class TrafficModel: ObservableObject {
             runoutPresentation = nil
         case .stayHidden:
             if atLaunch, usage.alerts.unconfirmed, let days = usage.alerts.lastShownDays {
+                let left = usage.alerts.lastShownRemainingBytes ?? remaining
+                let avg = usage.alerts.lastShownAverageBytes
                 runoutPresentation = RunoutAlertInfo(days:days,
-                    remainingBytes:usage.alerts.lastShownRemainingBytes ?? remaining,
-                    averageBytes:usage.alerts.lastShownAverageBytes,
-                    todayUsedBytes:summary.todayUsedBytes)
+                    remainingBytes:left,
+                    averageBytes:avg,
+                    todayUsedBytes:summary.todayUsedBytes,
+                    runoutDate:UsageMath.forecast(remainingBytes:left, averageBytes:avg ?? 0, now:now)?.date ?? summary.predictedRunoutDate)
             }
         }
         if dailyThresholdGB > 0, let today = summary.todayUsedBytes, TrafficStats.gb(today) >= dailyThresholdGB,

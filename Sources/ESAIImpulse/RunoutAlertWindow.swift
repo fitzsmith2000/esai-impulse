@@ -6,6 +6,7 @@ struct RunoutAlertInfo: Equatable {
     var remainingBytes: Double
     var averageBytes: Double?
     var todayUsedBytes: Double?
+    var runoutDate: Date? = nil
 }
 
 struct RunoutAlertView: View {
@@ -61,9 +62,9 @@ struct RunoutAlertView: View {
         let left = formatTraffic(gb:TrafficStats.gb(info.remainingBytes))
         let avg = info.averageBytes.map { formatTraffic(gb:TrafficStats.gb($0)) } ?? "—"
         var date = ""
-        if let avgB = info.averageBytes, avgB > 0, info.remainingBytes > 0 {
-            let days = info.remainingBytes/avgB
-            date = UsageMath.formatSGTDate(UsageMath.predictedRunoutDate(predictedDays:days,now:Date()),language:model.resolvedLanguage)
+        let instant = info.runoutDate ?? UsageMath.forecast(remainingBytes:info.remainingBytes, averageBytes:info.averageBytes ?? 0, now:model.now())?.date
+        if let instant = instant {
+            date = UsageMath.formatSGTDate(instant,language:model.resolvedLanguage)
         }
         if date.isEmpty { return t("剩余 %@，近 7 日日均 %@。请确认你已看到这条提醒。",left,avg) }
         return t("剩余 %@，近 7 日日均 %@。预计用尽日为 %@（新加坡日期）。请确认你已看到这条提醒。",left,avg,date)

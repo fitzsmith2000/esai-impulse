@@ -6,39 +6,96 @@ struct UsageBarChart: View {
     let days: [UsageDay]
     var accent: Color
     var compact = false
+    var language: AppLanguage = .chinese
+    @State private var hoveredID: String? = nil
     var body: some View {
         let finite = days.compactMap(\.usedBytes)
-        let maxBytes = max(finite.max() ?? 1, 1)
+        let yMax = UsageChartLayout.yMaxBytes(finite.max() ?? 0)
         GeometryReader { proxy in
-            let gap: CGFloat = compact ? 4 : 6
+            let gap = CGFloat(UsageChartLayout.gap(compact:compact))
             let n = max(1, days.count)
-            let width = max(2, (proxy.size.width - gap*CGFloat(n-1))/CGFloat(n))
-            HStack(alignment:.bottom,spacing:gap) {
-                ForEach(Array(days.enumerated()),id:\.offset) { _, day in
-                    VStack(spacing:compact ? 3 : 5) {
-                        Spacer(minLength:0)
-                        cap(day,maxBytes:maxBytes,width:min(width, compact ? 16 : 22),height:proxy.size.height - (compact ? 16 : 20))
-                        Text(shortLabel(day.id)).font(.system(size:compact ? 8 : 9.5)).foregroundStyle(.tertiary).monospacedDigit()
-                            .lineLimit(1).minimumScaleFactor(0.7)
-                    }.frame(maxWidth:.infinity)
+            let axisW: CGFloat = compact ? 0 : 36
+            let labelH: CGFloat = compact ? 16 : 20
+            let plotW = max(1, proxy.size.width - axisW)
+            let plotH = max(1, proxy.size.height - labelH)
+            let width = CGFloat(UsageChartLayout.barWidth(dayCount:n, available:Double(plotW), compact:compact))
+            let plotOriginX: CGFloat = compact ? 0 : axisW
+            ZStack(alignment:.topLeading) {
+                HStack(alignment:.bottom,spacing:0) {
+                    if !compact {
+                        VStack(alignment:.trailing,spacing:0) {
+                            Text(formatTraffic(gb:TrafficStats.gb(yMax)))
+                                .font(.system(size:9)).foregroundStyle(.tertiary).monospacedDigit()
+                                .lineLimit(1).minimumScaleFactor(0.7)
+                            Spacer(minLength:0)
+                        }.frame(width:axisW,height:plotH,alignment:.topTrailing)
+                        .padding(.trailing,4)
+                    }
+                    HStack(alignment:.bottom,spacing:gap) {
+                        ForEach(Array(days.enumerated()),id:\.offset) { _, day in
+                            VStack(spacing:compact ? 3 : 5) {
+                                Spacer(minLength:0)
+                                cap(day,maxBytes:yMax,width:width,height:plotH,highlighted:hoveredID == day.id)
+                                Text(shortLabel(day.id)).font(.system(size:compact ? 8 : 9.5))
+                                    .foregroundStyle(hoveredID == day.id ? .secondary : .tertiary).monospacedDigit()
+                                    .lineLimit(1).minimumScaleFactor(0.7)
+                            }
+                            .frame(width:width)
+                            .contentShape(Rectangle())
+                            .onContinuousHover { phase in
+                                switch phase {
+                                case .active(_): hoveredID = day.id
+                                case .ended: if hoveredID == day.id { hoveredID = nil }
+                                }
+                            }
+                        }
+                    }
+                    Spacer(minLength:0)
+                }
+                if let hoveredID, let idx = days.firstIndex(where:{ $0.id == hoveredID }) {
+                    let xCenter = plotOriginX + CGFloat(idx)*(width+gap) + width/2
+                    Color.clear.frame(width:0,height:0)
+                        .overlay(hoverChip(days[idx]))
+                        .offset(x:xCenter, y: compact ? 1 : 2)
+                        .allowsHitTesting(false)
+                        .zIndex(1)
                 }
             }
         }
     }
-    @ViewBuilder private func cap(_ day: UsageDay, maxBytes: Double, width: CGFloat, height: CGFloat) -> some View {
+    @ViewBuilder private func cap(_ day: UsageDay, maxBytes: Double, width: CGFloat, height: CGFloat, highlighted: Bool) -> some View {
         let fraction = max(0, (day.usedBytes ?? 0)/maxBytes)
         let h = max(day.usedBytes == nil ? 0 : 4, height*fraction)
         let shape = RoundedRectangle(cornerRadius:compact ? 2 : 3, style:.continuous)
-        if day.isToday {
-            shape.fill(stripes).frame(width:width,height:h)
-        } else if day.isIncomplete {
-            shape.fill(Color(red:0.77,green:0.71,blue:0.54)).frame(width:width,height:h)
-        } else if day.isMissing {
-            shape.fill(Color.clear).frame(width:width,height:max(4,h))
-                .overlay(shape.strokeBorder(Color.secondary.opacity(0.25),style:StrokeStyle(lineWidth:1,dash:[3,2])))
-        } else {
-            shape.fill(accent).frame(width:width,height:h)
+        let dimmed = hoveredID != nil && !highlighted
+        Group {
+            if day.isToday {
+                shape.fill(stripes).frame(width:width,height:h)
+            } else if day.isIncomplete {
+                shape.fill(Color(red:0.77,green:0.71,blue:0.54)).frame(width:width,height:h)
+            } else if day.isMissing {
+                shape.fill(Color.clear).frame(width:width,height:max(4,h))
+                    .overlay(shape.strokeBorder(Color.secondary.opacity(0.25),style:StrokeStyle(lineWidth:1,dash:[3,2])))
+            } else {
+                shape.fill(accent).frame(width:width,height:h)
+            }
         }
+        .opacity(dimmed ? 0.55 : 1)
+        .overlay {
+            if highlighted { shape.stroke(Color.primary.opacity(0.28),lineWidth:1).frame(width:width,height:h) }
+        }
+        .shadow(color:highlighted ? accent.opacity(0.35) : .clear, radius:highlighted ? 3 : 0, y:highlighted ? 1 : 0)
+    }
+    private func hoverChip(_ day: UsageDay) -> some View {
+        Text(UsageMath.barHoverLabel(day:day,language:language))
+            .font(.system(size:compact ? 10 : 11, weight:.semibold))
+            .monospacedDigit()
+            .padding(.horizontal,8).padding(.vertical,3)
+            .background(.ultraThinMaterial, in:Capsule())
+            .overlay(Capsule().strokeBorder(Color.primary.opacity(0.10)))
+            .shadow(color:.black.opacity(0.14), radius:4, y:1)
+            .fixedSize()
+            .allowsHitTesting(false)
     }
     private var stripes: AnyShapeStyle {
         AnyShapeStyle(LinearGradient(colors:[accent,accent.opacity(0.45)],startPoint:.top,endPoint:.bottom))
@@ -90,7 +147,7 @@ struct UsagePanelSummary: View {
                     .buttonStyle(.plain).font(.caption.weight(.semibold)).foregroundStyle(accent).pointingHandCursor()
             }
             if spark.contains(where:{ $0.usedBytes != nil }) {
-                UsageBarChart(days:spark,accent:accent,compact:true).frame(height:52)
+                UsageBarChart(days:spark,accent:accent,compact:true,language:model.resolvedLanguage).frame(height:52)
             }
             HStack(alignment:.firstTextBaseline) {
                 if let used = summary.todayUsedBytes {
@@ -101,11 +158,11 @@ struct UsagePanelSummary: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer(minLength:8)
-                if let whole = summary.predictedWholeDays, let frac = summary.predictedDays {
+                if let whole = summary.predictedWholeDays, let date = summary.predictedRunoutDate {
                     Text(t("预计约 %@ 天后用尽",String(whole)))
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(Color(red:0.78,green:0.42,blue:0.03))
-                        .help(runoutHelp(frac:frac))
+                        .help(runoutHelp(date:date))
                 }
             }
             HStack(spacing:8) {
@@ -123,8 +180,8 @@ struct UsagePanelSummary: View {
         }.padding(12).frame(maxWidth:.infinity,alignment:.leading).esaiCard()
         .help(sub)
     }
-    private func runoutHelp(frac: Double) -> String {
-        let date = UsageMath.formatSGTDate(UsageMath.predictedRunoutDate(predictedDays:frac,now:now),language:model.resolvedLanguage)
-        return model.translate("约 %@（新加坡日期）",arguments:[date])
+    private func runoutHelp(date: Date) -> String {
+        let text = UsageMath.formatSGTDate(date,language:model.resolvedLanguage)
+        return model.translate("约 %@（新加坡日期）",arguments:[text])
     }
 }
