@@ -37,14 +37,22 @@ final class TrafficModel: ObservableObject {
     @Published var loginEnabled = false
     @Published private var loginError: String?
     @Published private var loginNeedsApproval = false
+    @Published var runoutWarnDays = 10
+    @Published var dailyThresholdGB = 0.0
+    @Published var runoutPresentation: RunoutAlertInfo?
     let navigation = PanelNavigation()
+    let usage: UsageStore
+    var nowOverride: Date? = nil
+    var openHistoryHandler: (() -> Void)?
     private let defaults: UserDefaults
     private var timer: Timer?
     private var observers: [NSObjectProtocol] = []
+    func now() -> Date { nowOverride ?? Date() }
 
     /// `preview` builds a model for offscreen rendering only: no Keychain, network or notifications.
-    init(defaults: UserDefaults = .standard, preview: Bool = false) {
+    init(defaults: UserDefaults = .standard, preview: Bool = false, usage: UsageStore? = nil) {
         self.defaults = defaults
+        self.usage = usage ?? (preview ? UsageStore.memory() : UsageStore.applicationSupport())
         intervalMinutes = defaults.object(forKey:"intervalMinutes") as? Int ?? 15
         thresholdGB = defaults.object(forKey:"thresholdGB") as? Double ?? 200
         appearance = defaults.string(forKey:"appearance") ?? "system"
@@ -57,6 +65,9 @@ final class TrafficModel: ObservableObject {
         statusStyle = StatusStyle(rawValue:defaults.string(forKey:"statusStyle") ?? "") ?? .iconText
         typography = StatusTypography.load(defaults)
         statusConfigs = StatusConfigStore.load(defaults)
+        runoutWarnDays = defaults.object(forKey:"runoutWarnDays") as? Int ?? 10
+        dailyThresholdGB = defaults.object(forKey:"dailyThresholdGB") as? Double ?? 0
+        self.usage.setInterval(intervalMinutes)
         activeConfigID = defaults.string(forKey:StatusConfigStore.activeKey).flatMap { id in statusConfigs.contains { $0.id == id } ? id : nil }
         if activeConfigID == nil { activeConfigID = statusConfigs.first { $0.matches(style:statusStyle, typography:typography) }?.id }
         if preview { return }
@@ -88,8 +99,14 @@ final class TrafficModel: ObservableObject {
         }
         monitor.start(queue:DispatchQueue(label:"esai-impulse.path"))
         pathMonitor = monitor
+        if !preview, let s = stats, let last = lastRefresh {
+            self.usage.seedIfEmpty(used:s.used,total:s.total,left:s.left,at:last)
+        }
         scheduleTimer()
-        refresh()
+        if !preview {
+            evaluateUsageAlerts(atLaunch:true)
+            refresh()
+        }
     }
 
     // MARK: Data
@@ -113,7 +130,9 @@ final class TrafficModel: ObservableObject {
                 self.stats = s; self.lastRefresh = Date(); self.errorKey = nil; self.lastFailed = false
                 self.defaults.set(try? JSONEncoder().encode(s),forKey:"lastStats")
                 self.defaults.set(self.lastRefresh,forKey:"lastRefresh")
+                self.usage.record(used:s.used,total:s.total,left:s.left,at:self.now())
                 self.evaluateAlerts()
+                self.evaluateUsageAlerts()
             case .failure(let e):
                 self.lastFailed = true
                 switch e {
@@ -255,7 +274,93 @@ final class TrafficModel: ObservableObject {
         if stale { lines.append(translate(lastFailed ? "上次刷新失败，数据可能已过期" : "数据可能已过期")) }
         return lines.joined(separator:"\n")
     }
-    func setInterval(_ minutes: Int) { intervalMinutes = minutes; defaults.set(minutes,forKey:"intervalMinutes"); scheduleTimer() }
+    func setInterval(_ minutes: Int) {
+        intervalMinutes = minutes; defaults.set(minutes,forKey:"intervalMinutes")
+        usage.setInterval(minutes); scheduleTimer()
+    }
+
+    // MARK: Usage history & run-out warning
+    func usageDays(now: Date? = nil) -> [UsageDay] { usage.days(now:now ?? self.now()) }
+    func usageSummary(now: Date? = nil) -> UsageSummary {
+        usage.summary(remainingBytes:stats?.left,now:now ?? self.now())
+    }
+    func usageCSV(now: Date? = nil) -> String { usage.csv(days:usageDays(now:now ?? self.now()),language:resolvedLanguage) }
+    func openHistory() { openHistoryHandler?() }
+    /// Preview-only: pretend an account is saved so offscreen renders show the dashboard.
+    func prepareForUsageRender() { hasCredentials = true }
+
+    func setRunoutWarnDays(_ days: Int) {
+        runoutWarnDays = max(1,min(90,days)); defaults.set(runoutWarnDays,forKey:"runoutWarnDays")
+        evaluateUsageAlerts()
+    }
+    func setDailyThreshold(_ gb: Double) {
+        dailyThresholdGB = max(0,gb); defaults.set(dailyThresholdGB,forKey:"dailyThresholdGB")
+    }
+    var runoutWarnText: String { String(runoutWarnDays) }
+    var dailyThresholdText: String {
+        dailyThresholdGB == 0 ? "0" : (dailyThresholdGB.truncatingRemainder(dividingBy:1) == 0 ? String(Int(dailyThresholdGB)) : String(format:"%.1f",dailyThresholdGB))
+    }
+
+    func evaluateUsageAlerts(atLaunch: Bool = false) {
+        let now = self.now()
+        let summary = usageSummary(now:now)
+        let remaining = stats?.left ?? usage.alerts.lastShownRemainingBytes ?? 0
+        let action = RunoutPolicy.action(
+            predictedWholeDays:summary.predictedWholeDays, remainingBytes:remaining,
+            threshold:runoutWarnDays, unconfirmed:usage.alerts.unconfirmed,
+            acknowledgedDays:usage.alerts.acknowledgedDays)
+        switch action {
+        case .show(let days), .keepShowing(let days):
+            usage.updateAlerts {
+                $0.unconfirmed = true
+                $0.lastShownDays = days
+                $0.lastShownRemainingBytes = remaining
+                $0.lastShownAverageBytes = summary.average7
+            }
+            runoutPresentation = RunoutAlertInfo(days:days,remainingBytes:remaining,
+                averageBytes:summary.average7,todayUsedBytes:summary.todayUsedBytes)
+        case .dismiss:
+            usage.updateAlerts {
+                $0.unconfirmed = false
+                $0.acknowledgedDays = nil
+                $0.acknowledgedAt = nil
+                $0.lastShownDays = nil
+                $0.lastShownRemainingBytes = nil
+                $0.lastShownAverageBytes = nil
+            }
+            runoutPresentation = nil
+        case .stayHidden:
+            if atLaunch, usage.alerts.unconfirmed, let days = usage.alerts.lastShownDays {
+                runoutPresentation = RunoutAlertInfo(days:days,
+                    remainingBytes:usage.alerts.lastShownRemainingBytes ?? remaining,
+                    averageBytes:usage.alerts.lastShownAverageBytes,
+                    todayUsedBytes:summary.todayUsedBytes)
+            }
+        }
+        if dailyThresholdGB > 0, let today = summary.todayUsedBytes, TrafficStats.gb(today) >= dailyThresholdGB,
+           usage.alerts.dailyAckDayID != summary.todayID {
+            usage.updateAlerts { $0.dailyAckDayID = summary.todayID }
+            notifyDailyUsage(usedGB:TrafficStats.gb(today))
+        }
+    }
+
+    func confirmRunout() {
+        usage.updateAlerts {
+            $0.unconfirmed = false
+            $0.acknowledgedDays = $0.lastShownDays
+            $0.acknowledgedAt = now()
+        }
+        runoutPresentation = nil
+    }
+
+    private func notifyDailyUsage(usedGB: Double) {
+        let content = UNMutableNotificationContent()
+        content.title = "ESAI Impulse"
+        content.subtitle = translate("DataImpulse 今日用量已达阈值")
+        content.body = translate("今日已用 %@，超过 %@ GB 的每日提醒。",arguments:[formatTraffic(gb:usedGB),dailyThresholdText])
+        content.sound = .default
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier:"usage-daily-\(usage.alerts.dailyAckDayID ?? "")",content:content,trigger:nil))
+    }
     func setThreshold(_ gb: Double) {
         thresholdGB = max(1,gb); defaults.set(thresholdGB,forKey:"thresholdGB")
         // Re-arm so a raised threshold can alert again; never alert just for lowering it.

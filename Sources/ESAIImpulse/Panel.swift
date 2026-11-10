@@ -12,6 +12,8 @@ struct TrafficPanel: View {
     @State private var passwordDraft = ""
     @State private var credentialsSaved = false
     @State private var thresholdDraft: String
+    @State private var runoutDraft: String
+    @State private var dailyDraft: String
     private var accent: Color { model.accentColor }
     private func t(_ key: String, _ arguments: String...) -> String { model.translate(key,arguments:arguments) }
     init(model: TrafficModel) {
@@ -20,6 +22,8 @@ struct TrafficPanel: View {
         _customHex = State(initialValue:model.accentHex)
         _loginDraft = State(initialValue:model.savedLogin)
         _thresholdDraft = State(initialValue:model.thresholdText)
+        _runoutDraft = State(initialValue:model.runoutWarnText)
+        _dailyDraft = State(initialValue:model.dailyThresholdText)
     }
 
     var body: some View {
@@ -27,16 +31,19 @@ struct TrafficPanel: View {
             header.padding(.horizontal,16).padding(.top,14).padding(.bottom,12)
             EsaiHairline()
             if navigation.showingSettings { settingsTabs.padding(.horizontal,16).padding(.top,12).padding(.bottom,4) }
-            ScrollView(.vertical) {
-                Group {
-                    if navigation.showingSettings { settingsContent.padding(.vertical,16) }
-                    else { dashboard.padding(.vertical,16) }
-                }
-                .padding(.horizontal,16)
-                .frame(maxWidth:.infinity,alignment:.leading)
-                .background(EsaiScrollChrome().allowsHitTesting(false))
+            let page = Group {
+                if navigation.showingSettings { settingsContent.padding(.vertical,16) }
+                else { dashboard.padding(.vertical,16) }
             }
-            .frame(maxWidth:.infinity,maxHeight:.infinity)
+            .padding(.horizontal,16)
+            .frame(maxWidth:.infinity,alignment:.leading)
+            if EsaiRenderMode.offscreen {
+                page.frame(maxWidth:.infinity,alignment:.topLeading)
+            } else {
+                ScrollView(.vertical) {
+                    page.background(EsaiScrollChrome().allowsHitTesting(false))
+                }.frame(maxWidth:.infinity,maxHeight:.infinity)
+            }
             EsaiHairline()
             footer
         }
@@ -97,6 +104,11 @@ struct TrafficPanel: View {
                 }.padding(12).esaiCard(.sunken)
             }
             if let s = model.stats { statsView(s) }
+            if model.hasCredentials || model.usage.snapshots.isEmpty == false {
+                TimelineView(.periodic(from:.now,by:30)) { context in
+                    UsagePanelSummary(model:model,now:model.nowOverride ?? context.date,onOpenHistory:{ model.openHistory() })
+                }
+            }
             schedule
         }
     }
@@ -263,11 +275,55 @@ struct TrafficPanel: View {
                     .padding(12).frame(maxWidth:.infinity,alignment:.leading).esaiCard(.sunken)
                 Button(t("打开通知设置")) { model.openNotificationSettings() }.font(.caption).esaiGlassButton()
             }
+            EsaiHairline()
+            VStack(alignment:.leading,spacing:10) {
+                Text(t("用尽预测预警")).font(.headline)
+                HStack {
+                    Text(t("提前几天提醒")).font(.callout.weight(.medium))
+                    Spacer()
+                    field(TextField("10",text:$runoutDraft).multilineTextAlignment(.trailing).monospacedDigit()
+                        .onSubmit(applyRunoutDays)).frame(width:96)
+                    Text(t("天")).font(.callout).foregroundStyle(.secondary)
+                    Button(t("应用"),action:applyRunoutDays).font(.caption).esaiGlassButton()
+                }
+                HStack(spacing:6) {
+                    ForEach([5,7,10,14],id:\.self) { v in
+                        Button("\(v)") { runoutDraft = String(v); applyRunoutDays() }.font(.caption).esaiGlassButton(prominent:model.runoutWarnDays == v)
+                    }
+                }
+                Text(t("按近 7 日日均预测还能用多少天。剩余天数首次降到该值或以下时弹出桌面窗口，需点确认才会关闭；之后在 7、3、1 天再提醒。流量回升到该值以上后重新待命。"))
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+                    .padding(12).frame(maxWidth:.infinity,alignment:.leading).esaiCard(.sunken)
+            }
+            EsaiHairline()
+            VStack(alignment:.leading,spacing:10) {
+                Text(t("每日用量提醒")).font(.headline)
+                HStack {
+                    Text(t("每日阈值")).font(.callout.weight(.medium))
+                    Spacer()
+                    field(TextField("0",text:$dailyDraft).multilineTextAlignment(.trailing).monospacedDigit()
+                        .onSubmit(applyDailyThreshold)).frame(width:96)
+                    Text("GB").font(.callout).foregroundStyle(.secondary)
+                    Button(t("应用"),action:applyDailyThreshold).font(.caption).esaiGlassButton()
+                }
+                Text(t("今日用量达到该值时发送一次系统通知。设为 0 表示关闭，默认关闭。"))
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+                    .padding(12).frame(maxWidth:.infinity,alignment:.leading).esaiCard(.sunken)
+            }
         }
     }
     private func applyThreshold() {
         if let v = Double(thresholdDraft.replacingOccurrences(of:",",with:".")), v > 0 { model.setThreshold(v) }
         thresholdDraft = model.thresholdText
+    }
+    private func applyRunoutDays() {
+        if let v = Int(runoutDraft.trimmingCharacters(in:.whitespaces)), v > 0 { model.setRunoutWarnDays(v) }
+        runoutDraft = model.runoutWarnText
+    }
+    private func applyDailyThreshold() {
+        let raw = dailyDraft.replacingOccurrences(of:",",with:".").trimmingCharacters(in:.whitespaces)
+        if let v = Double(raw), v >= 0 { model.setDailyThreshold(v) }
+        dailyDraft = model.dailyThresholdText
     }
 
     /// Settings → 外观 without the scroll host, for `--render-settings`.

@@ -1,0 +1,572 @@
+import Foundation
+
+// MARK: - Singapore usage day (10:00 SGT → next 10:00 SGT)
+
+enum UsageCalendar {
+    static let timeZone = TimeZone(identifier:"Asia/Singapore")!
+    static let startHour = 10
+    static func calendar() -> Calendar {
+        var c = Calendar(identifier:.gregorian)
+        c.timeZone = timeZone
+        return c
+    }
+    /// Usage-day label: the Singapore calendar date on which the 10:00 window starts.
+    static func dayID(for date: Date, calendar cal: Calendar = calendar()) -> String {
+        var comps = cal.dateComponents([.year,.month,.day,.hour],from:date)
+        if (comps.hour ?? 0) < startHour {
+            let start = cal.date(from:DateComponents(year:comps.year,month:comps.month,day:comps.day))!
+            let prev = cal.date(byAdding:.day,value:-1,to:start)!
+            comps = cal.dateComponents([.year,.month,.day],from:prev)
+        }
+        return String(format:"%04d-%02d-%02d",comps.year!,comps.month!,comps.day!)
+    }
+    /// 10:00 SGT on `dayID`, and 10:00 SGT the following day.
+    static func interval(forDay id: String, calendar cal: Calendar = calendar()) -> (start: Date, end: Date) {
+        let parts = id.split(separator:"-").compactMap { Int($0) }
+        precondition(parts.count == 3, "invalid day id")
+        let start = cal.date(from:DateComponents(year:parts[0],month:parts[1],day:parts[2],hour:startHour))!
+        return (start, cal.date(byAdding:.day,value:1,to:start)!)
+    }
+    static func addingDays(_ n: Int, to id: String, calendar cal: Calendar = calendar()) -> String {
+        let start = interval(forDay:id,calendar:cal).start
+        return dayID(for:cal.date(byAdding:.day,value:n,to:start)!,calendar:cal)
+    }
+    static func daysFrom(_ start: String, through end: String, calendar cal: Calendar = calendar()) -> [String] {
+        if start > end { return [] }
+        var ids = [start]
+        while let last = ids.last, last < end { ids.append(addingDays(1,to:last,calendar:cal)) }
+        return ids
+    }
+    static func secondsLeft(inDayOf date: Date, now: Date, calendar cal: Calendar = calendar()) -> TimeInterval {
+        let end = interval(forDay:dayID(for:date,calendar:cal),calendar:cal).end
+        return max(0, end.timeIntervalSince(now))
+    }
+}
+
+/// Gap longer than this marks the wake day incomplete. Floor is 3 hours so brief sleep doesn't trip it.
+func usageGapThreshold(intervalMinutes: Int) -> TimeInterval {
+    max(Double(intervalMinutes*2 + 15)*60, 3*3600)
+}
+
+/// A used drop larger than this starts a new plan epoch (resets / new plan). Smaller dips are clamped to 0.
+let usageResetEpsilon: Double = 1_000_000
+
+// MARK: - Records
+
+struct UsageSnapshot: Codable, Equatable {
+    var ts: Date
+    var used: Double
+    var total: Double
+    var left: Double
+    var epoch: Int
+}
+
+struct UsageAlertState: Codable, Equatable {
+    /// Window is on screen (or was when the app quit) and has not been confirmed.
+    var unconfirmed = false
+    /// Floor(days remaining) at the last confirm in this episode; nil if not yet confirmed.
+    var acknowledgedDays: Int? = nil
+    var acknowledgedAt: Date? = nil
+    var lastShownDays: Int? = nil
+    var lastShownRemainingBytes: Double? = nil
+    var lastShownAverageBytes: Double? = nil
+    /// SGT day id on which the optional daily-usage notification already fired.
+    var dailyAckDayID: String? = nil
+}
+
+struct UsageFile: Codable, Equatable {
+    var version = 1
+    var snapshots: [UsageSnapshot] = []
+    var alerts = UsageAlertState()
+}
+
+struct UsageDay: Equatable {
+    var id: String
+    var usedBytes: Double? = nil
+    var isToday = false
+    var isIncomplete = false
+    var snapshotCount = 0
+    var firstTs: Date? = nil
+    var lastTs: Date? = nil
+    var isMissing: Bool { usedBytes == nil }
+    var isComplete: Bool { usedBytes != nil && !isToday && !isIncomplete }
+}
+
+struct UsageSummary: Equatable {
+    var todayID: String
+    var todayUsedBytes: Double? = nil
+    var todayIncomplete = false
+    var secondsLeftInDay: TimeInterval = 0
+    var average7: Double? = nil
+    var completeDays7 = 0
+    var average30: Double? = nil
+    var completeDays30 = 0
+    var considered30 = 0
+    /// remaining ÷ 7-day average, in days; nil if it cannot be predicted.
+    var predictedDays: Double? = nil
+    var predictedWholeDays: Int? = nil
+}
+
+enum UsageRange: String, CaseIterable { case seven = "7", thirty = "30", all = "all" }
+
+// MARK: - Pure math
+
+enum UsageMath {
+    static func rollup(snapshots: [UsageSnapshot], now: Date, intervalMinutes: Int,
+                       calendar cal: Calendar = UsageCalendar.calendar()) -> [UsageDay] {
+        let gap = usageGapThreshold(intervalMinutes:intervalMinutes)
+        let todayID = UsageCalendar.dayID(for:now,calendar:cal)
+        let ordered = snapshots.sorted { $0.ts < $1.ts }
+        guard let first = ordered.first else {
+            return [UsageDay(id:todayID,isToday:true)]
+        }
+        let startID = UsageCalendar.dayID(for:first.ts,calendar:cal)
+        var days: [UsageDay] = UsageCalendar.daysFrom(startID,through:todayID,calendar:cal).map {
+            UsageDay(id:$0,isToday:$0 == todayID)
+        }
+        var index: [String:Int] = [:]
+        for (i,d) in days.enumerated() { index[d.id] = i }
+
+        func markIncomplete(_ id: String) {
+            if let i = index[id] { days[i].isIncomplete = true }
+        }
+        func addUsage(_ id: String, _ bytes: Double) {
+            guard let i = index[id] else { return }
+            days[i].usedBytes = (days[i].usedBytes ?? 0) + bytes
+        }
+
+        for (offset, shot) in ordered.enumerated() {
+            let id = UsageCalendar.dayID(for:shot.ts,calendar:cal)
+            guard let i = index[id] else { continue }
+            days[i].snapshotCount += 1
+            if days[i].firstTs == nil { days[i].firstTs = shot.ts }
+            days[i].lastTs = shot.ts
+
+            if offset == 0 { continue }
+            let prev = ordered[offset-1]
+            let prevID = UsageCalendar.dayID(for:prev.ts,calendar:cal)
+            if shot.epoch != prev.epoch {
+                markIncomplete(id)
+                continue
+            }
+            let delta = shot.used - prev.used
+            if delta < -usageResetEpsilon {
+                markIncomplete(id)
+                continue
+            }
+            let gained = max(0, delta)
+            let span = shot.ts.timeIntervalSince(prev.ts)
+            addUsage(id, gained)
+            // A mid-day sleep still has a correct used-delta if both ends of the day are recorded.
+            // Only a gap that crosses the 10:00 SGT boundary cannot be split, so the wake day is incomplete.
+            if span > gap && prevID != id { markIncomplete(id) }
+        }
+
+        // A finished day whose last snapshot is far from the day end (app off) is incomplete.
+        // The leftover usage is attributed to the wake day by the gap rule above.
+        for i in days.indices {
+            let day = days[i]
+            if day.isToday || day.snapshotCount == 0 { continue }
+            let end = UsageCalendar.interval(forDay:day.id,calendar:cal).end
+            if let last = day.lastTs, end.timeIntervalSince(last) > gap, end <= now {
+                days[i].isIncomplete = true
+            }
+            let start = UsageCalendar.interval(forDay:day.id,calendar:cal).start
+            if let first = day.firstTs, first.timeIntervalSince(start) > gap {
+                days[i].isIncomplete = true
+            }
+        }
+        return days
+    }
+
+    static func average(of days: [UsageDay], last n: Int, excludingToday: Bool = true) -> (average: Double?, complete: Int, considered: Int) {
+        let pool = excludingToday ? days.filter { !$0.isToday } : days
+        let window = Array(pool.suffix(n))
+        let complete = window.filter(\.isComplete)
+        let considered = window.count
+        guard !complete.isEmpty else { return (nil,0,considered) }
+        let total = complete.compactMap(\.usedBytes).reduce(0,+)
+        return (total/Double(complete.count), complete.count, considered)
+    }
+
+    static func summarize(days: [UsageDay], remainingBytes: Double?, now: Date,
+                          calendar cal: Calendar = UsageCalendar.calendar()) -> UsageSummary {
+        let todayID = UsageCalendar.dayID(for:now,calendar:cal)
+        let today = days.first { $0.id == todayID }
+        let a7 = average(of:days,last:7)
+        let a30 = average(of:days,last:30)
+        var summary = UsageSummary(
+            todayID:todayID, todayUsedBytes:today?.usedBytes, todayIncomplete:today?.isIncomplete ?? false,
+            secondsLeftInDay:UsageCalendar.secondsLeft(inDayOf:now,now:now,calendar:cal),
+            average7:a7.average, completeDays7:a7.complete,
+            average30:a30.average, completeDays30:a30.complete, considered30:a30.considered)
+        if let left = remainingBytes, left > 0, let avg = a7.average, avg > 0, a7.complete >= 1 {
+            let daysLeft = left/avg
+            summary.predictedDays = daysLeft
+            summary.predictedWholeDays = Int(daysLeft.rounded(.down))
+        }
+        return summary
+    }
+
+    static func predictedRunoutDate(predictedDays: Double, now: Date) -> Date {
+        now.addingTimeInterval(predictedDays*24*3600)
+    }
+
+    static func formatSGTDate(_ date: Date, language: AppLanguage) -> String {
+        let f = DateFormatter()
+        f.calendar = UsageCalendar.calendar()
+        f.timeZone = UsageCalendar.timeZone
+        f.locale = language.locale
+        f.dateFormat = language == .english ? "MMM d" : "M月d日"
+        return f.string(from:date)
+    }
+
+    static func formatDuration(_ interval: TimeInterval, language: AppLanguage) -> String {
+        let total = max(0, Int(interval.rounded()))
+        let h = total/3600, m = (total%3600)/60
+        return language == .english ? "\(h) h \(m) min" : "\(h) 小时 \(m) 分"
+    }
+}
+
+// MARK: - Runout policy
+
+enum RunoutAction: Equatable {
+    case stayHidden
+    case show(days: Int)
+    case keepShowing(days: Int)
+    case dismiss
+}
+
+enum RunoutPolicy {
+    static let milestones = [7,3,1]
+    static func action(predictedWholeDays: Int?, remainingBytes: Double, threshold: Int,
+                       unconfirmed: Bool, acknowledgedDays: Int?) -> RunoutAction {
+        let limit = max(1, threshold)
+        // Depleted, or remaining days climbed back above the threshold: end this episode and re-arm.
+        if remainingBytes <= 0 { return .dismiss }
+        if let days = predictedWholeDays, days > limit { return .dismiss }
+        guard let days = predictedWholeDays else { return unconfirmed ? .dismiss : .stayHidden }
+        if unconfirmed { return .keepShowing(days:days) }
+        if acknowledgedDays == nil { return .show(days:days) }
+        if let ack = acknowledgedDays, let barrier = (milestones + [limit]).filter({ $0 < ack }).max(), days <= barrier {
+            return .show(days:days)
+        }
+        return .stayHidden
+    }
+}
+
+// MARK: - Persistence
+
+final class UsageStore {
+    private let url: URL?
+    private var file: UsageFile
+    private(set) var intervalMinutes: Int
+    var snapshots: [UsageSnapshot] { file.snapshots }
+    var alerts: UsageAlertState { file.alerts }
+
+    /// On-disk store in Application Support. Creates the folder if needed.
+    static func applicationSupport() -> UsageStore {
+        let root = FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0]
+            .appendingPathComponent("com.fitzsmith2000.esai-impulse",isDirectory:true)
+        try? FileManager.default.createDirectory(at:root,withIntermediateDirectories:true)
+        return UsageStore(url:root.appendingPathComponent("usage.json"))
+    }
+    static func memory(_ file: UsageFile = UsageFile()) -> UsageStore { UsageStore(url:nil,file:file) }
+
+    init(url: URL?, file: UsageFile = UsageFile(), intervalMinutes: Int = 15) {
+        self.url = url
+        self.intervalMinutes = intervalMinutes
+        if let url = url, let data = try? Data(contentsOf:url),
+           let decoded = try? Self.decoder.decode(UsageFile.self,from:data) {
+            self.file = decoded
+        } else {
+            self.file = file
+        }
+    }
+
+    func setInterval(_ minutes: Int) { intervalMinutes = minutes }
+
+    /// Append a snapshot. Drops near-duplicates; starts a new epoch when used drops sharply.
+    @discardableResult
+    func record(used: Double, total: Double, left: Double, at date: Date) -> Bool {
+        if let last = file.snapshots.last,
+           date.timeIntervalSince(last.ts) < 60,
+           last.used == used, last.total == total { return false }
+        var epoch = file.snapshots.last?.epoch ?? 0
+        if let last = file.snapshots.last, used + usageResetEpsilon < last.used { epoch += 1 }
+        file.snapshots.append(UsageSnapshot(ts:date,used:used,total:total,left:left,epoch:epoch))
+        save()
+        return true
+    }
+
+    /// First launch of 1.2.0: seed one snapshot from the cached last refresh if it is recent and the store is empty.
+    func seedIfEmpty(used: Double, total: Double, left: Double, at date: Date, now: Date = Date()) {
+        guard file.snapshots.isEmpty else { return }
+        guard now.timeIntervalSince(date) < 24*3600 else { return }
+        _ = record(used:used,total:total,left:left,at:date)
+    }
+
+    func days(now: Date) -> [UsageDay] {
+        UsageMath.rollup(snapshots:file.snapshots,now:now,intervalMinutes:intervalMinutes)
+    }
+    func summary(remainingBytes: Double?, now: Date) -> UsageSummary {
+        UsageMath.summarize(days:days(now:now),remainingBytes:remainingBytes,now:now)
+    }
+
+    func updateAlerts(_ mutate: (inout UsageAlertState) -> Void) {
+        mutate(&file.alerts)
+        save()
+    }
+
+    func csv(days: [UsageDay], language: AppLanguage = .english) -> String {
+        var lines = ["date,usage_gb,status,snapshot_count,first_ts,last_ts"]
+        let iso = ISO8601DateFormatter()
+        func stamp(_ d: Date?) -> String { d.map { iso.string(from:$0) } ?? "" }
+        for day in days.reversed() {
+            let status: String
+            if day.isToday { status = "today" }
+            else if day.isMissing { status = "missing" }
+            else if day.isIncomplete { status = "incomplete" }
+            else { status = "complete" }
+            let usage = day.usedBytes.map { String(format:"%.3f",TrafficStats.gb($0)) } ?? ""
+            lines.append("\(day.id),\(usage),\(status),\(day.snapshotCount),\(stamp(day.firstTs)),\(stamp(day.lastTs))")
+        }
+        return lines.joined(separator:"\n") + "\n"
+    }
+
+    private func save() {
+        guard let url = url else { return }
+        guard let data = try? Self.encoder.encode(file) else { return }
+        let temp = url.appendingPathExtension("tmp")
+        do {
+            try data.write(to:temp,options:.atomic)
+            _ = try FileManager.default.replaceItemAt(url,withItemAt:temp)
+        } catch {
+            try? data.write(to:url,options:.atomic)
+            try? FileManager.default.removeItem(at:temp)
+        }
+    }
+
+    private static var encoder: JSONEncoder {
+        let e = JSONEncoder()
+        e.outputFormatting = [.prettyPrinted,.sortedKeys]
+        e.dateEncodingStrategy = .iso8601
+        return e
+    }
+    private static var decoder: JSONDecoder {
+        let d = JSONDecoder()
+        d.dateDecodingStrategy = .iso8601
+        return d
+    }
+}
+
+// MARK: - Sample data for offscreen renders
+
+enum UsageSample {
+    static func store(now: Date = sampleNow) -> UsageStore {
+        let s = UsageStore.memory()
+        // Build 14 usage-days of snapshots ending "today" 11/9 22:36 PT = 14:36 SGT 11/10? 
+        // Sample now is 22:36 PST on 9 Nov 2026 = 14:36 SGT on 10 Nov, which would be the Nov 10 usage day
+        // (starts 10:00 SGT Nov 10). To match the mockup "11月9日" as today, pin "now" to 03:36 SGT on Nov 10
+        // (still in the Nov 9 usage day, which ends 10:00 SGT Nov 10). 03:36 SGT = 11:36 PST Nov 9.
+        // The mockup used "距今日结束还有 11 小时 24 分" → 10:00 - 11h24m = 22:36 SGT Nov 9,
+        // which is still Nov 9 usage day (starts 10:00 SGT Nov 9). 22:36 SGT = 06:36 PST Nov 9.
+        let values: [(String,Double,Bool)] = [
+            ("2026-10-27",133.8,false),("2026-10-28",116.5,false),("2026-10-29",121.0,false),
+            ("2026-10-30",144.7,false),("2026-10-31",89.2,false),("2026-11-01",131.4,false),
+            ("2026-11-02",125.6,false),("2026-11-03",109.8,false),("2026-11-04",152.1,false),
+            ("2026-11-05",98.4,false),("2026-11-06",141.0,true),("2026-11-07",118.5,false),
+            ("2026-11-08",136.2,false),("2026-11-09",42.6,false)
+        ]
+        var used: Double = 4_200_000_000_000
+        let total: Double = 5_661_800_000_000
+        for (id, gb, incomplete) in values {
+            let start = UsageCalendar.interval(forDay:id).start
+            _ = s.record(used:used,total:total,left:total-used,at:start)
+            if incomplete {
+                used += (gb*1e9)/2
+                _ = s.record(used:used,total:total,left:total-used,at:start.addingTimeInterval(2*3600))
+                // 4-hour gap still inside the same usage day; leftover usage lands on this day.
+                used += (gb*1e9)/2
+                _ = s.record(used:used,total:total,left:total-used,at:start.addingTimeInterval(6*3600))
+                let endish = start.addingTimeInterval(23*3600)
+                _ = s.record(used:used,total:total,left:total-used,at:endish)
+            } else if id == "2026-11-09" {
+                used += gb*1e9
+                _ = s.record(used:used,total:total,left:total-used,at:sampleNow)
+            } else {
+                used += gb*1e9
+                let endish = start.addingTimeInterval(23*3600)
+                _ = s.record(used:used,total:total,left:total-used,at:endish)
+            }
+        }
+        return s
+    }
+    /// 22:36 SGT on 9 Nov 2026 — 11 h 24 min left in the Nov 9 usage day.
+    static let sampleNow: Date = {
+        var c = UsageCalendar.calendar()
+        return c.date(from:DateComponents(year:2026,month:11,day:9,hour:22,minute:36))!
+    }()
+    static let sampleStats = TrafficStats(total:5_661_800_000_000,used:4_551_100_000_000,left:1_110_700_000_000)
+}
+
+// MARK: - Self-tests
+
+enum UsageTests {
+    static func sgt(_ y: Int, _ m: Int, _ d: Int, _ h: Int, _ min: Int = 0, _ s: Int = 0) -> Date {
+        UsageCalendar.calendar().date(from:DateComponents(year:y,month:m,day:d,hour:h,minute:min,second:s))!
+    }
+    static func run() {
+        // SGT boundary: 09:59 belongs to the previous usage day; 10:00 starts a new one.
+        precondition(UsageCalendar.dayID(for:sgt(2026,11,10,9,59)) == "2026-11-09")
+        precondition(UsageCalendar.dayID(for:sgt(2026,11,10,10,0)) == "2026-11-10")
+        precondition(UsageCalendar.dayID(for:sgt(2026,11,10,0,0)) == "2026-11-09")
+        let (start,end) = UsageCalendar.interval(forDay:"2026-11-09")
+        precondition(start == sgt(2026,11,9,10))
+        precondition(end == sgt(2026,11,10,10))
+        let left = UsageCalendar.secondsLeft(inDayOf:sgt(2026,11,9,22,36),now:sgt(2026,11,9,22,36))
+        precondition(abs(left - (11*3600 + 24*60)) < 1)
+
+        // DST independence: US spring-forward (2026-03-08) and fall-back (2026-11-01)
+        // must not change the Singapore day id around 10:00 SGT.
+        let march = sgt(2026,3,15,10) // PDT is in effect in the US
+        precondition(UsageCalendar.dayID(for:march) == "2026-03-15")
+        precondition(UsageCalendar.dayID(for:march.addingTimeInterval(-60)) == "2026-03-14")
+        let nov = sgt(2026,11,9,10) // PST is in effect in the US
+        precondition(UsageCalendar.dayID(for:nov) == "2026-11-09")
+        precondition(UsageCalendar.dayID(for:nov.addingTimeInterval(-60)) == "2026-11-08")
+        // Same instant expressed from a PT calendar still yields the SGT day.
+        var pt = Calendar(identifier:.gregorian); pt.timeZone = TimeZone(identifier:"America/Los_Angeles")!
+        let ptMarch = pt.date(from:DateComponents(year:2026,month:3,day:14,hour:19))! // 19:00 PDT = 10:00 SGT Mar 15
+        precondition(UsageCalendar.dayID(for:ptMarch) == "2026-03-15")
+        let ptNov = pt.date(from:DateComponents(year:2026,month:11,day:8,hour:18))! // 18:00 PST = 10:00 SGT Nov 9
+        precondition(UsageCalendar.dayID(for:ptNov) == "2026-11-09")
+
+        // Top-up: total rises, used grows by 10 GB only — top-up itself is not usage.
+        let store = UsageStore.memory()
+        let t0 = sgt(2026,11,8,10)
+        _ = store.record(used:100e9,total:200e9,left:100e9,at:t0)
+        _ = store.record(used:110e9,total:500e9,left:390e9,at:t0.addingTimeInterval(2*3600)) // +10 GB used, +300 GB top-up
+        _ = store.record(used:110e9,total:500e9,left:390e9,at:sgt(2026,11,9,9,0))
+        let days = store.days(now:sgt(2026,11,9,12))
+        let nov8 = days.first { $0.id == "2026-11-08" }!
+        precondition(abs((nov8.usedBytes ?? -1) - 10e9) < 1, "top-up must not count as usage")
+        precondition(nov8.isComplete)
+
+        // Used reset / new plan: drop in used starts a new epoch and is not negative usage.
+        let reset = UsageStore.memory()
+        _ = reset.record(used:80e9,total:100e9,left:20e9,at:sgt(2026,11,8,10))
+        _ = reset.record(used:90e9,total:100e9,left:10e9,at:sgt(2026,11,8,12))
+        _ = reset.record(used:5e9,total:200e9,left:195e9,at:sgt(2026,11,8,13)) // reset
+        _ = reset.record(used:8e9,total:200e9,left:192e9,at:sgt(2026,11,9,12))
+        let rDays = reset.days(now:sgt(2026,11,9,12))
+        let r8 = rDays.first { $0.id == "2026-11-08" }!
+        precondition(r8.isIncomplete)
+        precondition((r8.usedBytes ?? 0) >= 0)
+        precondition(abs((r8.usedBytes ?? 0) - 10e9) < 1, "usage before reset kept; drop not subtracted")
+        precondition(reset.snapshots.last?.epoch == 1)
+
+        // Gaps: 4 hours off (> 3h floor) — delta lands on the wake day, which is incomplete;
+        // a day with no snapshots in the middle is missing.
+        let gapped = UsageStore.memory(); gapped.setInterval(15)
+        _ = gapped.record(used:10e9,total:100e9,left:90e9,at:sgt(2026,11,7,12)) // Nov 7
+        _ = gapped.record(used:20e9,total:100e9,left:80e9,at:sgt(2026,11,7,18)) // still Nov 7, regular
+        _ = gapped.record(used:20e9,total:100e9,left:80e9,at:sgt(2026,11,8,9))  // close to day end
+        // Sleep from Nov 8 09:00 until Nov 10 12:00 SGT (Nov 10 usage day starts 10:00 Nov 10).
+        _ = gapped.record(used:50e9,total:100e9,left:50e9,at:sgt(2026,11,10,12))
+        let gDays = gapped.days(now:sgt(2026,11,11,12))
+        let g7 = gDays.first { $0.id == "2026-11-07" }!
+        let g8 = gDays.first { $0.id == "2026-11-08" }!
+        let g9 = gDays.first { $0.id == "2026-11-09" }!
+        let g10 = gDays.first { $0.id == "2026-11-10" }!
+        precondition(g7.isComplete)
+        precondition(abs((g7.usedBytes ?? 0) - 10e9) < 1)
+        // 09:00 SGT Nov 8 is still the Nov 7 usage day, so Nov 8 and Nov 9 have no snapshots.
+        precondition(g8.isMissing)
+        precondition(g9.isMissing)
+        precondition(g9.usedBytes == nil)
+        precondition(g10.isIncomplete)
+        precondition(abs((g10.usedBytes ?? 0) - 30e9) < 1, "gap usage attributed to wake day")
+
+        // Averages exclude today, incomplete, and missing days.
+        let avgStore = UsageStore.memory()
+        // Three complete days (Nov 5–7) at 10, 20, 30 GB, Nov 8 incomplete 40, Nov 9 today 5.
+        func fill(_ id: String, gb: Double, startUsed: inout Double, incomplete: Bool = false) {
+            let start = UsageCalendar.interval(forDay:id).start
+            _ = avgStore.record(used:startUsed,total:1000e9,left:1000e9-startUsed,at:start)
+            startUsed += gb*1e9
+            if incomplete {
+                // Stop early so this finished day has no closing bound and is incomplete.
+                _ = avgStore.record(used:startUsed,total:1000e9,left:0,at:start.addingTimeInterval(4*3600))
+            } else {
+                _ = avgStore.record(used:startUsed,total:1000e9,left:0,at:start.addingTimeInterval(23*3600))
+            }
+        }
+        var u = 0.0
+        fill("2026-11-05",gb:10,startUsed:&u)
+        fill("2026-11-06",gb:20,startUsed:&u)
+        fill("2026-11-07",gb:30,startUsed:&u)
+        fill("2026-11-08",gb:40,startUsed:&u,incomplete:true)
+        _ = avgStore.record(used:u,total:1000e9,left:0,at:sgt(2026,11,9,10))
+        u += 5e9
+        _ = avgStore.record(used:u,total:1000e9,left:0,at:sgt(2026,11,9,12))
+        let aDays = avgStore.days(now:sgt(2026,11,9,12,30))
+        let a7 = UsageMath.average(of:aDays,last:7)
+        // complete days in window: Nov 5,6,7 (Nov 8 incomplete, Nov 9 today excluded)
+        precondition(a7.complete == 3)
+        precondition(abs((a7.average ?? 0) - 20e9) < 1)
+
+        // Prediction: remaining / 7-day avg, floored; nil when no complete days, avg 0, or remaining <= 0.
+        let rem = 50e9
+        var summary = UsageMath.summarize(days:aDays,remainingBytes:rem,now:sgt(2026,11,9,12,30))
+        // 50 / 20 = 2.5 → floor 2
+        precondition(abs((summary.predictedDays ?? 0) - 2.5) < 0.01)
+        precondition(summary.predictedWholeDays == 2)
+        summary = UsageMath.summarize(days:aDays,remainingBytes:0,now:sgt(2026,11,9,12,30))
+        precondition(summary.predictedDays == nil)
+        let emptySummary = UsageMath.summarize(days:[UsageDay(id:"2026-11-09",isToday:true)],remainingBytes:100e9,now:sgt(2026,11,9,12))
+        precondition(emptySummary.predictedDays == nil)
+
+        // Run-out re-alert rules.
+        let T = 10
+        precondition(RunoutPolicy.action(predictedWholeDays:11,remainingBytes:100,threshold:T,unconfirmed:false,acknowledgedDays:nil) == .dismiss ||
+                     RunoutPolicy.action(predictedWholeDays:11,remainingBytes:100,threshold:T,unconfirmed:false,acknowledgedDays:nil) == .stayHidden)
+        // days > threshold with no window: dismiss (re-arm / clear) — see below, stayHidden vs dismiss.
+        precondition(RunoutPolicy.action(predictedWholeDays:11,remainingBytes:100,threshold:T,unconfirmed:false,acknowledgedDays:nil) == .dismiss)
+        precondition(RunoutPolicy.action(predictedWholeDays:8,remainingBytes:100,threshold:T,unconfirmed:false,acknowledgedDays:nil) == .show(days:8))
+        precondition(RunoutPolicy.action(predictedWholeDays:8,remainingBytes:100,threshold:T,unconfirmed:true,acknowledgedDays:nil) == .keepShowing(days:8))
+        // After confirm at 8, do not re-show at 8.
+        precondition(RunoutPolicy.action(predictedWholeDays:8,remainingBytes:100,threshold:T,unconfirmed:false,acknowledgedDays:8) == .stayHidden)
+        // Milestone 7.
+        precondition(RunoutPolicy.action(predictedWholeDays:7,remainingBytes:100,threshold:T,unconfirmed:false,acknowledgedDays:8) == .show(days:7))
+        precondition(RunoutPolicy.action(predictedWholeDays:3,remainingBytes:100,threshold:T,unconfirmed:false,acknowledgedDays:7) == .show(days:3))
+        precondition(RunoutPolicy.action(predictedWholeDays:1,remainingBytes:100,threshold:T,unconfirmed:false,acknowledgedDays:3) == .show(days:1))
+        precondition(RunoutPolicy.action(predictedWholeDays:1,remainingBytes:100,threshold:T,unconfirmed:false,acknowledgedDays:1) == .stayHidden)
+        // Re-arm when remaining days climb back above 10.
+        precondition(RunoutPolicy.action(predictedWholeDays:12,remainingBytes:100,threshold:T,unconfirmed:false,acknowledgedDays:8) == .dismiss)
+        precondition(RunoutPolicy.action(predictedWholeDays:12,remainingBytes:100,threshold:T,unconfirmed:true,acknowledgedDays:nil) == .dismiss)
+        // Depleted: dismiss (existing depleted path takes over).
+        precondition(RunoutPolicy.action(predictedWholeDays:5,remainingBytes:0,threshold:T,unconfirmed:true,acknowledgedDays:nil) == .dismiss)
+        // No prediction: close an unconfirmed window, otherwise stay hidden.
+        precondition(RunoutPolicy.action(predictedWholeDays:nil,remainingBytes:100,threshold:T,unconfirmed:true,acknowledgedDays:nil) == .dismiss)
+        precondition(RunoutPolicy.action(predictedWholeDays:nil,remainingBytes:100,threshold:T,unconfirmed:false,acknowledgedDays:nil) == .stayHidden)
+        // Unconfirmed on launch is keepShowing as long as still <= threshold.
+        precondition(RunoutPolicy.action(predictedWholeDays:8,remainingBytes:100,threshold:T,unconfirmed:true,acknowledgedDays:nil) == .keepShowing(days:8))
+
+        precondition(abs(usageGapThreshold(intervalMinutes:15) - 3*3600) < 1)
+        precondition(UsageMath.formatDuration(11*3600+24*60,language:.chinese) == "11 小时 24 分")
+        precondition(UsageMath.formatDuration(11*3600+24*60,language:.english) == "11 h 24 min")
+
+        // Dedup: same used/total within 60s is ignored.
+        let dup = UsageStore.memory()
+        precondition(dup.record(used:1,total:2,left:1,at:sgt(2026,11,9,10)))
+        precondition(dup.record(used:1,total:2,left:1,at:sgt(2026,11,9,10,0,30)) == false)
+        precondition(dup.snapshots.count == 1)
+
+        // CSV has a header and does not invent usage for missing days.
+        let csv = gapped.csv(days:gDays)
+        precondition(csv.hasPrefix("date,usage_gb,status,"))
+        precondition(csv.contains("2026-11-09,,missing,"))
+        precondition(csv.contains("2026-11-10,") && csv.contains(",incomplete,"))
+    }
+}

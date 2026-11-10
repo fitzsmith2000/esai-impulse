@@ -23,6 +23,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNU
     private var statusItem: NSStatusItem!
     private var popover: NSPopover!
     private var model: TrafficModel!
+    private var historyWindow: HistoryWindowController?
+    private var runoutWindow: RunoutWindowController?
     private var subscriptions = Set<AnyCancellable>()
     private var localMonitor: Any?
     private var globalMonitor: Any?
@@ -34,6 +36,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNU
         NSApp.mainMenu = EditMenu.make()
         UNUserNotificationCenter.current().delegate = self
         model = TrafficModel()
+        model.openHistoryHandler = { [weak self] in self?.openHistory() }
+        runoutWindow = RunoutWindowController(model:model) { [weak self] in self?.model.confirmRunout() }
+        model.$runoutPresentation.removeDuplicates().receive(on:RunLoop.main).sink { [weak self] info in
+            guard let self = self else { return }
+            if let info = info { self.runoutWindow?.show(info) } else { self.runoutWindow?.dismiss() }
+        }.store(in:&subscriptions)
         statusItem = NSStatusBar.system.statusItem(withLength:NSStatusItem.variableLength)
         statusItem.button?.imagePosition = .imageLeading
         statusItem.button?.target = self; statusItem.button?.action = #selector(statusClicked)
@@ -89,14 +97,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNU
         if popover.isShown { popover.performClose(nil) }
         let menu = NSMenu()
         let refresh = NSMenuItem(title:model.translate("立即刷新"), action:#selector(menuRefresh), keyEquivalent:"r"); refresh.target = self
+        let history = NSMenuItem(title:model.translate("用量历史…"), action:#selector(menuHistory), keyEquivalent:"u"); history.target = self
         let settings = NSMenuItem(title:model.translate("设置…"), action:#selector(menuSettings), keyEquivalent:","); settings.target = self
         let quit = NSMenuItem(title:model.translate("退出 ESAI Impulse"), action:#selector(NSApplication.terminate(_:)), keyEquivalent:"q")
-        menu.items = [refresh, settings, .separator(), quit]
+        menu.items = [refresh, history, settings, .separator(), quit]
         statusItem.menu = menu
         statusItem.button?.performClick(nil)
         statusItem.menu = nil
     }
     @objc private func menuRefresh() { model.refresh() }
+    @objc private func menuHistory() { openHistory() }
+    private func openHistory() {
+        if historyWindow == nil { historyWindow = HistoryWindowController(model:model) }
+        historyWindow?.show()
+    }
     @objc private func menuSettings() {
         model.navigation.settingsTab = "account"; model.navigation.showingSettings = true
         if !popover.isShown { togglePanel() }
@@ -185,6 +199,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNU
         if let i = CommandLine.arguments.firstIndex(of:"--render-settings") {
             let file = CommandLine.arguments.count > i+1 ? CommandLine.arguments[i+1] : "/tmp/esai-impulse-settings.png"
             MainActor.assumeIsolated { SettingsRender.run(to:file, dark:CommandLine.arguments.contains("--dark")) }; return
+        }
+        if let i = CommandLine.arguments.firstIndex(of:"--render-usage") {
+            let folder = CommandLine.arguments.count > i+1 ? CommandLine.arguments[i+1] : "/tmp/esai-impulse-usage"
+            MainActor.assumeIsolated { UsageRender.run(to:folder, dark:CommandLine.arguments.contains("--dark")) }; return
         }
         if CommandLine.arguments.contains("--probe") { CLI.probe(); return }
         if CommandLine.arguments.contains("--refresh-once") { CLI.refreshOnce(); return }
@@ -329,6 +347,7 @@ enum SelfTest {
         m2.deleteConfig(c1.id); precondition(m2.activeConfigID == nil && m2.statusConfigs.count == 2)
         precondition(TrafficModel(defaults:ud, preview:true).statusConfigs.count == 2)
         ud.removePersistentDomain(forName:suite)
+        UsageTests.run()
         let edit = EditMenu.make().items[1].submenu!
         for (key,sel) in [("v","paste:"),("c","copy:"),("x","cut:"),("a","selectAll:"),("z","undo:")] {
             precondition(edit.items.contains { $0.keyEquivalent == key && $0.action == Selector((sel)) && $0.keyEquivalentModifierMask == .command })
